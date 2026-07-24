@@ -65,6 +65,9 @@ export default function (pi: ExtensionAPI) {
       const subArgs = parts?.slice(1).join(" ");
 
       switch (subCommand) {
+        case "init":
+          await handleInit(cmds, subArgs, ctx);
+          return;
         case "status":
           return handleRoute(await cmds.status(), ctx);
         case "diff":
@@ -279,6 +282,40 @@ async function executeMenuChoice(
       await handleRouteWithConfirmAndReload("rollback", await cmds.rollback(), ctx);
       return;
   }
+}
+
+/**
+ * /pisync init 处理 — 如果没提供 URL，通过对话提示用户输入
+ */
+async function handleInit(
+  cmds: PiSyncCommands,
+  gitUrl: string | undefined,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  let url = gitUrl;
+
+  if (!url) {
+    // 交互式获取 URL
+    url = await ctx.ui.input(
+      "Enter your config repo Git URL:",
+      "git@github.com:you/pi-config.git",
+    );
+
+    if (!url) {
+      ctx.ui.notify("Init cancelled.", "info");
+      return;
+    }
+  }
+
+  const result = await cmds.init(url);
+
+  if (result.needsReload) {
+    ctx.ui.notify(result.message, "info");
+    await ctx.reload();
+    return;
+  }
+
+  ctx.ui.notify(result.message, "info");
 }
 
 /**

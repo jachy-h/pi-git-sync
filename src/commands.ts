@@ -19,6 +19,7 @@ import {
   getHeadCommit,
   hasUncommittedChanges,
   isDiverged,
+  gitExec,
 } from "./git.ts";
 import { loadPiSyncConfig } from "./config.ts";
 import type { PiSyncConfig } from "./config.ts";
@@ -339,6 +340,132 @@ export class PiSyncCommands {
     }
   }
 
+  // ============ init ============
+
+  async init(gitUrl?: string): Promise<{ message: string; needsReload: boolean }> {
+    const defaultPath = join(this.agentDir, "..", "config-repo");
+
+    if (!gitUrl) {
+      return {
+        message: "Please provide a Git URL for your config repository:\n" +
+          "  /pisync init git@github.com:you/pi-config.git",
+        needsReload: false,
+      };
+    }
+
+    // Validate URL format
+    if (!isValidGitUrl(gitUrl)) {
+      return {
+        message: `Invalid Git URL: ${gitUrl}\n` +
+          "Expected formats:\n" +
+          "  git@github.com:user/repo.git\n" +
+          "  https://github.com/user/repo.git\n" +
+          "  ssh://git@github.com/user/repo.git",
+        needsReload: false,
+      };
+    }
+
+    const acquired = await this.lock.acquire("init", 5000);
+    if (!acquired) {
+      return { message: "Another sync operation is in progress.", needsReload: false };
+    }
+
+    try {
+      const lines: string[] = [];
+
+      if (existsSync(defaultPath) && existsSync(join(defaultPath, ".git"))) {
+        // Repo already exists, verify it's the same remote
+        const result = await gitExec(defaultPath, ["remote", "get-url", "origin"]);
+        const existingUrl = result.stdout.trim();
+
+        if (!urlsMatch(existingUrl, gitUrl)) {
+          return {
+            message: `A config repo already exists at ${defaultPath}\n` +
+              `Existing remote: ${existingUrl}\n` +
+              `Provided URL:   ${gitUrl}\n` +
+              "To switch, remove the existing repo first: rm -rf ~/.pi/config-repo",
+            needsReload: false,
+          };
+        }
+
+        // Same repo — fetch and pull
+        lines.push(`Config repo already exists at ${defaultPath}`);
+        lines.push("Fetching latest changes...");
+
+        await gitFetch(defaultPath);
+        const status = await gitStatus(defaultPath);
+        const { pulled } = await gitPull(defaultPath, status.branch);
+        lines.push(pulled ? "Updated to latest." : "Already up to date.");
+      } else {
+        // Fresh clone
+        lines.push(`Cloning ${gitUrl}...`);
+        const { mkdir } = await import("node:fs/promises");
+        await mkdir(join(defaultPath, ".."), { recursive: true });
+
+        try {
+          const { exec: execCb } = await import("node:child_process");
+          const { promisify } = await import("node:util");
+          const execAsync = promisify(execCb);
+          await execAsync(`git clone "${gitUrl}" "${defaultPath}"`, {
+            timeout: 60000,
+            env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+          });
+        } catch (err: unknown) {
+          // Clean up failed clone
+          if (existsSync(defaultPath)) {
+            const { rm } = await import("node:fs/promises");
+            await rm(defaultPath, { recursive: true, force: true });
+          }
+          return {
+            message: `Clone failed: ${err instanceof Error ? err.message : "Unknown error"}\n` +
+              "Check that the URL is correct and your SSH key is configured.",
+            needsReload: false,
+          };
+        }
+        lines.push("Clone complete.");
+      }
+
+      // Update state
+      await updateState(this.agentDir, { repoPath: defaultPath });
+
+      // Install as Pi package
+      lines.push("Installing as Pi package...");
+      try {
+        const { exec: execCb } = await import("node:child_process");
+        const { promisify } = await import("node:util");
+        const execAsync = promisify(execCb);
+        await execAsync(`pi install "${defaultPath}"`, {
+          timeout: 60000,
+          env: { ...process.env },
+        });
+        lines.push("Package installed.");
+      } catch (err: unknown) {
+        lines.push(
+          `pi install failed: ${err instanceof Error ? err.message : "Unknown"}`,
+        );
+        lines.push(`Run manually: pi install ${defaultPath}`);
+      }
+
+      // Apply config
+      const config = await loadPiSyncConfig(defaultPath);
+      const applyResult = await this.applyCurrent(defaultPath, config, "init");
+      lines.push(applyResult);
+
+      lines.push("");
+      lines.push("Setup complete! Your config is now synced.");
+      lines.push("Use /pisync for day-to-day sync operations.");
+
+      return { message: lines.join("\n"), needsReload: true };
+    } catch (err) {
+      return {
+        message: `Init failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+        needsReload: false,
+      };
+    } finally {
+      await this.lock.release();
+    }
+  }
+
   // ============ apply ============
 
   async apply(repoPath?: string): Promise<string> {
@@ -572,6 +699,45 @@ export class PiSyncCommands {
 
     return lines.join("\n");
   }
+}
+
+/**
+ * 深度合并到本地 settings（保护 preserved 字段）
+ */
+/**
+ * 校验 Git URL 格式
+ */
+function isValidGitUrl(url: string): boolean {
+  // git@host:path
+  if (/^git@[\w.-]+:[\w./-]+\.git$/.test(url)) return true;
+  // https://host/path.git
+  if (/^https?:\/\/[\w./-]+\.git$/.test(url)) return true;
+  // ssh://git@host/path.git
+  if (/^ssh:\/\/git@[\w./-]+\.git$/.test(url)) return true;
+  // git://host/path.git
+  if (/^git:\/\/[\w./-]+\.git$/.test(url)) return true;
+  // Without .git suffix
+  if (/^git@[\w.-]+:[\w./-]+$/.test(url)) return true;
+  if (/^https?:\/\/[\w./-]+$/.test(url)) return true;
+  if (/^ssh:\/\/git@[\w./-]+$/.test(url)) return true;
+  if (/^git:\/\/[\w./-]+$/.test(url)) return true;
+  return false;
+}
+
+/**
+ * 比较两个 Git URL 是否指向同一个仓库
+ */
+function urlsMatch(a: string, b: string): boolean {
+  const normalize = (url: string) =>
+    url
+      .replace(/^https?:\/\//, "")
+      .replace(/^ssh:\/\/git@/, "")
+      .replace(/^git@/, "")
+      .replace(/^git:\/\//, "")
+      .replace(/\.git$/, "")
+      .replace(/:\d+\//, "/") // strip port
+      .toLowerCase();
+  return normalize(a) === normalize(b);
 }
 
 /**
