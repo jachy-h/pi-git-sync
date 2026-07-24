@@ -372,6 +372,7 @@ export class PiSyncCommands {
 
     try {
       const lines: string[] = [];
+      let isNewRepo = false;
 
       if (existsSync(defaultPath) && existsSync(join(defaultPath, ".git"))) {
         // Repo already exists, verify it's the same remote
@@ -423,6 +424,31 @@ export class PiSyncCommands {
           };
         }
         lines.push("Clone complete.");
+        isNewRepo = true;
+      }
+
+      // Scaffold config files if repo is empty (no commits / no pi-sync.json)
+      const hasConfig = existsSync(join(defaultPath, "pi-sync.json"));
+      if (!hasConfig) {
+        lines.push("Empty repository detected — scaffolding config structure...");
+        await scaffoldConfigRepo(defaultPath);
+        // Initial commit and push
+        await gitExec(defaultPath, ["add", "-A"]);
+        await gitExec(defaultPath, ["commit", "-m", "pi-sync: initial config scaffold"]);
+        try {
+          const status = await gitStatus(defaultPath);
+          await gitPush(defaultPath, status.branch);
+          lines.push("Scaffold pushed to remote.");
+        } catch {
+          lines.push("Scaffold committed locally (push skipped — remote may not be reachable).");
+        }
+        lines.push("");
+      }
+
+      // If this was a fresh clone of an empty repo, now fetch again to sync
+      if (isNewRepo && hasConfig) {
+        // Not empty — just ensure we have latest
+        await gitFetch(defaultPath).catch(() => {});
       }
 
       // Update state
@@ -702,8 +728,61 @@ export class PiSyncCommands {
 }
 
 /**
- * 深度合并到本地 settings（保护 preserved 字段）
+ * 在空仓库中生成配置脚手架文件
  */
+async function scaffoldConfigRepo(repoPath: string): Promise<void> {
+  const { mkdir, writeFile } = await import("node:fs/promises");
+
+  // Create directories
+  await mkdir(join(repoPath, "config", "machines"), { recursive: true });
+  await mkdir(join(repoPath, "extensions"), { recursive: true });
+  await mkdir(join(repoPath, "skills"), { recursive: true });
+  await mkdir(join(repoPath, "prompts"), { recursive: true });
+  await mkdir(join(repoPath, "themes"), { recursive: true });
+  await mkdir(join(repoPath, "files"), { recursive: true });
+
+  // package.json
+  const pkgJson = {
+    name: "personal-pi-config",
+    private: true,
+    keywords: ["pi-package"],
+    pi: {
+      extensions: ["./extensions"],
+      skills: ["./skills"],
+      prompts: ["./prompts"],
+      themes: ["./themes"],
+    },
+  };
+  await writeFile(join(repoPath, "package.json"), JSON.stringify(pkgJson, null, 2), "utf-8");
+
+  // pi-sync.json
+  const piSync = {
+    schemaVersion: 1,
+    branch: "main",
+    settings: {
+      source: "config/settings.shared.json",
+      strategy: "managed-keys",
+      preserve: ["lastChangelogVersion", "trackingId", "httpProxy"],
+    },
+    files: [
+      { source: "files/AGENTS.md", target: "AGENTS.md" },
+      { source: "files/SYSTEM.md", target: "SYSTEM.md", optional: true },
+      { source: "files/keybindings.json", target: "keybindings.json", optional: true },
+    ],
+    security: {
+      deny: ["auth.json", "trust.json", "sessions/**", "**/.env"],
+      scanSecretsBeforePush: true,
+    },
+  };
+  await writeFile(join(repoPath, "pi-sync.json"), JSON.stringify(piSync, null, 2), "utf-8");
+
+  // config/settings.shared.json (empty, to be populated by capture)
+  await writeFile(join(repoPath, "config", "settings.shared.json"), "{}", "utf-8");
+
+  // .gitignore
+  await writeFile(join(repoPath, ".gitignore"), "# Local state — never sync\n.pi-sync/\n", "utf-8");
+}
+
 /**
  * 校验 Git URL 格式
  */

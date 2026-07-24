@@ -13,17 +13,35 @@ Sync Pi configuration across machines via GitHub Private Repository.
 ### 前置条件 / Prerequisites
 
 - Pi 已安装 / Pi installed
-- 一个 **GitHub 私有仓库**（用于存放配置）/ A **GitHub Private Repository** for your config
-- Git 和 SSH 已配置 / Git + SSH configured
+- Git 和 SSH 已配置（用于 GitHub）/ Git + SSH configured (for GitHub)
 
-### 1. 创建配置仓库 / Create Config Repo
+### 1. 在 GitHub 创建空私有仓库 / Create an Empty Private Repo on GitHub
 
-在 GitHub 创建一个私有仓库（例如 `pi-config`），按以下结构组织：
+创建一个空的私有仓库（例如 `pi-config`），**不要** 勾选 "Initialize with README"。
 
-Create a private repo on GitHub (e.g. `pi-config`) with this structure:
+Create an empty private repo on GitHub (e.g. `pi-config`). Do **NOT** check "Initialize with README".
+
+### 2. 安装 pi-git-sync / Install pi-git-sync
+
+```bash
+pi install npm:@jachy/pi-git-sync
+```
+
+### 3. 一键初始化 / One-Click Init
+
+在 Pi 中执行，提供你的仓库 URL 即可。pi-git-sync 会自动 clone、生成配置文件结构（scaffold）、提交并推送到远端。
+
+In Pi, just provide your repo URL. pi-git-sync will clone, scaffold config structure, commit and push automatically.
+
+```bash
+/pisync init git@github.com:<your-username>/pi-config.git
+```
+
+生成的仓库结构 / Generated repo structure:
 
 ```text
 pi-config/
+├── .gitignore
 ├── package.json              # Pi Package manifest
 ├── pi-sync.json              # Sync configuration
 ├── extensions/               # Custom extensions
@@ -32,88 +50,26 @@ pi-config/
 ├── themes/                   # Themes
 ├── config/
 │   ├── settings.shared.json  # Shared settings
-│   ├── settings.macos.json   # macOS overrides (optional)
-│   ├── settings.linux.json   # Linux overrides (optional)
-│   └── machines/
-│       └── my-mac.json       # Per-machine overrides (optional)
+│   └── machines/             # Per-machine overrides (optional)
 └── files/
-    ├── AGENTS.md
-    ├── SYSTEM.md
-    ├── keybindings.json
-    └── zentui.json
 ```
 
-`package.json` 示例：
+### 4. 导入当前配置 / Capture Current Config
 
-```json
-{
-  "name": "personal-pi-config",
-  "private": true,
-  "keywords": ["pi-package"],
-  "pi": {
-    "extensions": ["./extensions"],
-    "skills": ["./skills"],
-    "prompts": ["./prompts"],
-    "themes": ["./themes"]
-  }
-}
-```
+首次使用，把当前本地配置导入仓库：
 
-`pi-sync.json` 示例：
-
-```json
-{
-  "schemaVersion": 1,
-  "branch": "main",
-  "settings": {
-    "source": "config/settings.shared.json",
-    "strategy": "managed-keys",
-    "preserve": ["lastChangelogVersion", "trackingId", "httpProxy"]
-  },
-  "files": [
-    { "source": "files/AGENTS.md", "target": "AGENTS.md" },
-    { "source": "files/SYSTEM.md", "target": "SYSTEM.md", "optional": true },
-    { "source": "files/keybindings.json", "target": "keybindings.json", "optional": true }
-  ],
-  "security": {
-    "deny": ["auth.json", "trust.json", "sessions/**", "**/.env"],
-    "scanSecretsBeforePush": true
-  }
-}
-```
-
-### 2. 克隆配置仓库 / Clone Config Repo
-
-```bash
-git clone git@github.com:<your-username>/pi-config.git ~/.pi/config-repo
-```
-
-### 3. 安装 pi-git-sync / Install pi-git-sync
-
-```bash
-pi install npm:@jachy/pi-git-sync
-```
-
-Then install your config repo as a Pi package:
-
-然后把配置仓库作为 Pi package 安装：
-
-```bash
-pi install ~/.pi/config-repo
-```
-
-### 4. 应用配置 / Apply Config
-
-在 Pi 中执行：
-
-```bash
-/pisync apply
-```
-
-首次使用可先用 `/pisync capture` 把当前本地配置导入仓库：
+On first use, import your current local config into the repo:
 
 ```bash
 /pisync capture
+```
+
+然后 commit + push：
+
+Then commit + push:
+
+```bash
+/pisync push
 ```
 
 ---
@@ -154,6 +110,29 @@ pi install ~/.pi/config-repo
 ### 不同步的内容 / What Never Gets Synced
 
 `auth.json`, `sessions/`, `trust.json`, `models-store.json`, `npm/`, `git/`, `node_modules/`, `.env`, `*.pem`, `id_rsa` 等包含认证信息或可重建的安装产物。
+
+### `pi-sync.json` 说明 / Config Reference
+
+```json
+{
+  "schemaVersion": 1,
+  "branch": "main",
+  "settings": {
+    "source": "config/settings.shared.json",
+    "strategy": "managed-keys",
+    "preserve": ["lastChangelogVersion", "trackingId", "httpProxy"]
+  },
+  "files": [
+    { "source": "files/AGENTS.md", "target": "AGENTS.md" },
+    { "source": "files/SYSTEM.md", "target": "SYSTEM.md", "optional": true },
+    { "source": "files/keybindings.json", "target": "keybindings.json", "optional": true }
+  ],
+  "security": {
+    "deny": ["auth.json", "trust.json", "sessions/**", "**/.env"],
+    "scanSecretsBeforePush": true
+  }
+}
+```
 
 ### Settings 合并模型 / Settings Merge Model
 
