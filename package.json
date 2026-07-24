@@ -1,0 +1,35 @@
+{
+  "name": "@jachy/pi-git-sync",
+  "version": "0.1.1",
+  "description": "Sync Pi configuration across machines via GitHub Private Repository",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "git-sync"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm test",
+    "pub": "npm version patch && npm publish --access public",
+    "pub:minor": "npm version minor && npm publish --access public",
+    "pub:major": "npm version major && npm publish --access public"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
