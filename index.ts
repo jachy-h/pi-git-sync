@@ -56,9 +56,9 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setStatus("pi-sync", undefined);
   });
 
-  // /pisync - 状态概览（无子命令时显示菜单）
+  // /pisync - TUI 操作菜单（或子命令）
   pi.registerCommand("pisync", {
-    description: "Sync Pi configuration via Git repository (status|diff|pull|push|apply|capture|doctor|rollback)",
+    description: "Sync Pi configuration via Git repository (init|status|diff|pull|push|capture|doctor|rollback)",
     async handler(args, ctx) {
       const parts = args?.trim().split(/\s+/);
       const subCommand = parts?.[0];
@@ -76,8 +76,6 @@ export default function (pi: ExtensionAPI) {
           return handleRouteWithConfirm("pull", await cmds.pull(), ctx);
         case "push":
           return handleRoute(await cmds.push(undefined, subArgs), ctx);
-        case "apply":
-          return handleRouteWithReload(await cmds.apply(), ctx);
         case "capture":
           return handleRoute(await cmds.capture(), ctx);
         case "doctor":
@@ -120,7 +118,7 @@ async function getMenuChoice(ctx: ExtensionCommandContext): Promise<string | nul
     { value: "diff", label: "Diff" },
     { value: "pull", label: "Pull" },
     { value: "push", label: "Push" },
-    { value: "apply", label: "Apply" },
+    { value: "init", label: "Init" },
     { value: "capture", label: "Capture" },
     { value: "doctor", label: "Doctor" },
     { value: "rollback", label: "Rollback" },
@@ -140,7 +138,7 @@ async function getMenuChoice(ctx: ExtensionCommandContext): Promise<string | nul
   // json / print 模式：无法交互，展示可用命令列表
   const lines = [
     `pi-git-sync${summary}`,
-    "Available commands: /pisync status|diff|pull|push|apply|capture|doctor|rollback",
+    "Available commands: /pisync init|status|diff|pull|push|capture|doctor|rollback",
   ];
   ctx.ui.notify(lines.join("\n"), "info");
   return null;
@@ -160,7 +158,7 @@ async function showTuiMenu(
       diff: "Show pending changes before sync",
       pull: "Pull and apply remote changes",
       push: "Commit and push local changes",
-      apply: "Apply current repo version (offline)",
+      init: "Initialize or clone a config repo",
       capture: "Import local config into repo",
       doctor: "Run diagnostic checks",
       rollback: "Restore previous backup",
@@ -269,8 +267,8 @@ async function executeMenuChoice(
     case "push":
       ctx.ui.notify(await cmds.push(), "info");
       return;
-    case "apply":
-      await handleRouteWithReload(await cmds.apply(), ctx);
+    case "init":
+      await handleInit(cmds, undefined, ctx);
       return;
     case "capture":
       ctx.ui.notify(await cmds.capture(), "info");
@@ -285,7 +283,9 @@ async function executeMenuChoice(
 }
 
 /**
- * /pisync init 处理 — 如果没提供 URL，通过对话提示用户输入
+ * /pisync init 处理
+ * - 如果已初始化：直接 apply（不需 URL）
+ * - 如果未初始化：交互式获取 Git URL
  */
 async function handleInit(
   cmds: PiSyncCommands,
@@ -295,7 +295,22 @@ async function handleInit(
   let url = gitUrl;
 
   if (!url) {
-    // 交互式获取 URL
+    // 未提供 URL — 先尝试直接 init（已初始化场景会直接 apply）
+    const quickResult = await cmds.init();
+
+    // 如果不需要 URL（即已初始化），直接处理结果
+    if (quickResult.needsReload ||
+        !quickResult.message.includes("Enter your config repo Git URL")) {
+      if (quickResult.needsReload) {
+        ctx.ui.notify(quickResult.message, "info");
+        await ctx.reload();
+      } else {
+        ctx.ui.notify(quickResult.message, "info");
+      }
+      return;
+    }
+
+    // 需要 URL — 交互式获取
     url = await ctx.ui.input(
       "Enter your config repo Git URL:",
       "git@github.com:you/pi-config.git",

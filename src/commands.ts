@@ -340,14 +340,48 @@ export class PiSyncCommands {
     }
   }
 
-  // ============ init ============
+  // ============ init (统一入口: 首次设置 clone/scaffold，后续调用直接 apply) ============
 
+  /**
+   * 统一 init 命令。
+   * - 如果已经初始化过（state 中有 repoPath 且 repo 存在），直接 apply
+   * - 如果没有初始化，要求提供 gitUrl：
+   *   - 空仓库：scaffold 配置结构
+   *   - 已有 pi-sync.json 的标准同步仓库：拉取并 apply
+   *   - 有内容但不是标准同步仓库：报错提示
+   */
   async init(gitUrl?: string): Promise<{ message: string; needsReload: boolean }> {
     const defaultPath = join(this.agentDir, "..", "config-repo");
 
+    // 已初始化：直接 apply
+    if (await this.isAlreadyInitialized(defaultPath)) {
+      const acquired = await this.lock.acquire("apply", 5000);
+      if (!acquired) {
+        return { message: "Another sync operation is in progress.", needsReload: false };
+      }
+      try {
+        // Fetch latest first
+        try {
+          await gitFetch(defaultPath);
+          const status = await gitStatus(defaultPath);
+          if (status.behind > 0) {
+            await gitPull(defaultPath, status.branch);
+          }
+        } catch {
+          // Offline or no remote — proceed with local apply
+        }
+        const config = await loadPiSyncConfig(defaultPath);
+        const applyResult = await this.applyCurrent(defaultPath, config, "init");
+        return { message: `Already initialized. Applied current config.\n${applyResult}`, needsReload: true };
+      } finally {
+        await this.lock.release();
+      }
+    }
+
+    // 未初始化 — 需要 gitUrl
     if (!gitUrl) {
       return {
-        message: "Please provide a Git URL for your config repository:\n" +
+        message: "Enter your config repo Git URL to get started:\n" +
           "  /pisync init git@github.com:you/pi-config.git",
         needsReload: false,
       };
@@ -372,10 +406,10 @@ export class PiSyncCommands {
 
     try {
       const lines: string[] = [];
-      let isNewRepo = false;
+      let isNewClone = false;
 
       if (existsSync(defaultPath) && existsSync(join(defaultPath, ".git"))) {
-        // Repo already exists, verify it's the same remote
+        // Repo already exists locally, verify it's the same remote
         const result = await gitExec(defaultPath, ["remote", "get-url", "origin"]);
         const existingUrl = result.stdout.trim();
 
@@ -388,15 +422,7 @@ export class PiSyncCommands {
             needsReload: false,
           };
         }
-
-        // Same repo — fetch and pull
         lines.push(`Config repo already exists at ${defaultPath}`);
-        lines.push("Fetching latest changes...");
-
-        await gitFetch(defaultPath);
-        const status = await gitStatus(defaultPath);
-        const { pulled } = await gitPull(defaultPath, status.branch);
-        lines.push(pulled ? "Updated to latest." : "Already up to date.");
       } else {
         // Fresh clone
         lines.push(`Cloning ${gitUrl}...`);
@@ -412,7 +438,6 @@ export class PiSyncCommands {
             env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
           });
         } catch (err: unknown) {
-          // Clean up failed clone
           if (existsSync(defaultPath)) {
             const { rm } = await import("node:fs/promises");
             await rm(defaultPath, { recursive: true, force: true });
@@ -424,15 +449,19 @@ export class PiSyncCommands {
           };
         }
         lines.push("Clone complete.");
-        isNewRepo = true;
+        isNewClone = true;
       }
 
-      // Scaffold config files if repo is empty (no commits / no pi-sync.json)
-      const hasConfig = existsSync(join(defaultPath, "pi-sync.json"));
-      if (!hasConfig) {
+      // Fetch latest
+      await gitFetch(defaultPath).catch(() => {});
+
+      // Detect repo state: empty / valid sync repo / invalid
+      const repoState = await detectRepoState(defaultPath);
+
+      if (repoState === "empty") {
+        // Empty repo — scaffold
         lines.push("Empty repository detected — scaffolding config structure...");
         await scaffoldConfigRepo(defaultPath);
-        // Initial commit and push
         await gitExec(defaultPath, ["add", "-A"]);
         await gitExec(defaultPath, ["commit", "-m", "pi-sync: initial config scaffold"]);
         try {
@@ -443,12 +472,21 @@ export class PiSyncCommands {
           lines.push("Scaffold committed locally (push skipped — remote may not be reachable).");
         }
         lines.push("");
-      }
-
-      // If this was a fresh clone of an empty repo, now fetch again to sync
-      if (isNewRepo && hasConfig) {
-        // Not empty — just ensure we have latest
-        await gitFetch(defaultPath).catch(() => {});
+      } else if (repoState === "invalid") {
+        return {
+          message: `The repository at ${gitUrl} has commits but is not a valid pi-sync config repo.\n` +
+            "A pi-sync config repo must have a pi-sync.json at its root.\n" +
+            "Either:\n" +
+            "  1. Use an empty repository for auto-scaffolding, or\n" +
+            "  2. Ensure the repo contains a valid pi-sync.json file.",
+          needsReload: false,
+        };
+      } else {
+        // Valid sync repo — pull latest
+        lines.push("Valid sync repo detected — fetching latest...");
+        const status = await gitStatus(defaultPath);
+        const { pulled } = await gitPull(defaultPath, status.branch);
+        lines.push(pulled ? "Updated to latest." : "Already up to date.");
       }
 
       // Update state
@@ -492,13 +530,27 @@ export class PiSyncCommands {
     }
   }
 
-  // ============ apply ============
+  /**
+   * 判断是否已初始化：state 中有 repoPath 且 repo 存在且是有效的同步仓库
+   */
+  private async isAlreadyInitialized(repoPath: string): Promise<boolean> {
+    try {
+      const state = await loadState(this.agentDir);
+      if (!state.repoPath || !existsSync(state.repoPath)) return false;
+      if (!existsSync(join(state.repoPath, ".git"))) return false;
+      if (!existsSync(join(state.repoPath, "pi-sync.json"))) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // ============ apply (保留给高级用户，命令行直接调用) ============
 
   async apply(repoPath?: string): Promise<string> {
     const rp = repoPath ?? (await getRepoPath());
     const config = await loadPiSyncConfig(rp);
 
-    // 保存 repoPath 到 state
     await updateState(this.agentDir, { repoPath: rp });
 
     const acquired = await this.lock.acquire("apply", 5000);
@@ -725,6 +777,31 @@ export class PiSyncCommands {
 
     return lines.join("\n");
   }
+}
+
+/**
+ * 检测仓库状态:
+ * - "empty": 没有 commits（真正的空仓库）
+ * - "valid": 有 pi-sync.json，是标准同步仓库
+ * - "invalid": 有 commits 但没有 pi-sync.json
+ */
+async function detectRepoState(repoPath: string): Promise<"empty" | "valid" | "invalid"> {
+  // 检查是否有 commits
+  let hasCommits = false;
+  try {
+    const result = await gitExec(repoPath, ["rev-list", "--count", "HEAD"]);
+    hasCommits = parseInt(result.stdout.trim(), 10) > 0;
+  } catch {
+    // rev-list fails on truly empty repo (no HEAD)
+    hasCommits = false;
+  }
+
+  if (!hasCommits) return "empty";
+
+  // Has commits — check for pi-sync.json
+  if (existsSync(join(repoPath, "pi-sync.json"))) return "valid";
+
+  return "invalid";
 }
 
 /**
