@@ -1,6 +1,6 @@
 {
   "name": "@jachy/pi-git-sync",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Sync Pi configuration across machines via GitHub Private Repository",
   "keywords": [
     "pi-package",
