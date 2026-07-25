@@ -198,11 +198,20 @@ export async function gitPull(repoPath: string, branch: string): Promise<{ pulle
  * Push
  */
 export async function gitPush(repoPath: string, branch: string): Promise<void> {
-  const result = await gitExec(repoPath, ["push", "origin", branch]);
-  if (result.stderr && !result.stderr.startsWith("To ") && !result.stderr.startsWith("Enumerating")) {
-    if (result.stderr.includes("error:") || result.stderr.includes("fatal:")) {
-      throw new Error(`git push failed: ${result.stderr}`);
-    }
+  // Set the upstream on the first push as well, so subsequent status/push calls
+  // can reliably compare against origin/<branch>.
+  const result = await gitExec(repoPath, ["push", "--set-upstream", "origin", branch]);
+  const failed = /fatal:|error:|failed to push some refs|\[rejected\]|remote rejected/i.test(result.stderr);
+  if (failed) {
+    throw new Error(`git push failed: ${result.stderr || result.stdout}`);
+  }
+}
+
+/** Rename the current branch, failing instead of silently continuing on an error. */
+export async function gitRenameBranch(repoPath: string, branch: string): Promise<void> {
+  const result = await gitExec(repoPath, ["branch", "-M", branch]);
+  if (/fatal:|error:/i.test(result.stderr)) {
+    throw new Error(`git branch rename failed: ${result.stderr || result.stdout}`);
   }
 }
 

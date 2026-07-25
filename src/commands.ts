@@ -12,6 +12,7 @@ import {
   gitFetch,
   gitPull,
   gitPush,
+  gitRenameBranch,
   gitDiff,
   gitDiffFiles,
   gitDiffRange,
@@ -463,16 +464,27 @@ export class PiSyncCommands {
         lines.push("Empty repository detected — scaffolding config structure...");
         await scaffoldConfigRepo(defaultPath);
         await gitCommit(defaultPath, "pi-sync: initial config scaffold");
+
+        // A newly cloned empty repository has no reliable local branch name
+        // (it can be either main or master).  The scaffold declares main, so
+        // make that explicit and push it immediately.
+        await gitRenameBranch(defaultPath, "main");
         try {
           await gitPush(defaultPath, "main");
-          lines.push("Scaffold pushed to remote.");
-        } catch {
-          try {
-            await gitPush(defaultPath, "master");
-            lines.push("Scaffold pushed to remote.");
-          } catch {
-            lines.push("Scaffold committed locally (push skipped — remote may not be reachable).");
-          }
+          lines.push("Scaffold committed and pushed to origin/main.");
+        } catch (err) {
+          // Keep the local scaffold usable: the user can resolve the remote
+          // issue and retry with /pisync push without re-running init.
+          await updateState(this.agentDir, { repoPath: defaultPath });
+          const detail = err instanceof Error ? err.message : "Unknown error";
+          return {
+            message: `${lines.join("\n")}\n\n` +
+              "The initial scaffold was committed locally but could not be pushed.\n" +
+              "The remote may have received another commit while initialization was running, or access was denied. " +
+              "Resolve the remote conflict/authentication issue, then run /pisync push.\n" +
+              `Details: ${detail}`,
+            needsReload: false,
+          };
         }
         lines.push("");
       } else if (repoState === "invalid") {
