@@ -2,9 +2,9 @@
  * Git 操作封装：status, fetch, pull, push, log
  */
 import { promisify } from "node:util";
-import { exec as execCb } from "node:child_process";
+import { execFile as execFileCb } from "node:child_process";
 
-const execAsync = promisify(execCb);
+const execFileAsync = promisify(execFileCb);
 
 export interface GitStatus {
   branch: string;
@@ -64,12 +64,18 @@ export async function gitExec(
   args: string[],
   options?: { timeout?: number },
 ): Promise<{ stdout: string; stderr: string }> {
-  const command = `git ${args.join(" ")}`;
+  // NOTE: we deliberately use execFile (argv array) instead of building a shell
+  // string.  Arguments such as commit messages contain spaces and other shell
+  // metacharacters; concatenating them into a single shell command would make
+  // `git commit -m some message` parse `message` (and everything after it) as
+  // pathspecs, silently producing no commit.  Passing an argv array hands each
+  // argument to git verbatim with no shell interpolation.
   try {
-    const result = await execAsync(command, {
+    const result = await execFileAsync("git", args, {
       cwd: repoPath,
       timeout: options?.timeout ?? 30000,
       env: buildGitEnv(),
+      maxBuffer: 20 * 1024 * 1024,
     });
     return { stdout: result.stdout.trimEnd(), stderr: result.stderr.trimEnd() };
   } catch (err: unknown) {
@@ -264,17 +270,35 @@ export async function gitPullRebase(repoPath: string, branch: string): Promise<v
 
 /**
  * Stage 所有变更并提交
+ *
+ * 关键点：不能只靠 stderr 里是否出现 "fatal:" 来判断失败 —— git 在很多失败
+ * 场景（例如 pathspec 不匹配）只打印 "error:"，且 gitExec 又会把非零退出码
+ * 吞掉转为返回值。这会导致 `git commit -m <multi-word message>` 在旧实现
+ * 下因为消息被 shell 拆分而静默不提交，调用方却毫无感知。
+ *
+ * 这里改为：先记录提交前的 HEAD，提交后再次读取，若既不是 "nothing to
+ * commit" 又没有产生新的 commit，则视为真正的失败并抛出，把问题暴露出来。
  */
 export async function gitCommit(
   repoPath: string,
   message: string,
 ): Promise<void> {
+  const before = await getHeadCommit(repoPath).catch(() => "");
   await gitExec(repoPath, ["add", "-A"]);
   const result = await gitExec(repoPath, ["commit", "-m", message]);
-  if (result.stderr && result.stderr.includes("nothing to commit")) {
-    // No changes is fine
-  } else if (result.stderr && result.stderr.includes("fatal:")) {
-    throw new Error(`git commit failed: ${result.stderr}`);
+
+  const combined = `${result.stderr}\n${result.stdout}`;
+  if (/nothing to commit|no changes added to commit/i.test(combined)) {
+    // 没有可提交的变更 —— 正常情况
+    return;
+  }
+
+  const after = await getHeadCommit(repoPath).catch(() => "");
+  if (after === "" || after === before) {
+    // 既不是 "无变更"，也没有产生新的提交 —— 提交真的失败了。
+    throw new Error(
+      `git commit failed: ${result.stderr || result.stdout || "no commit was created"}`,
+    );
   }
 }
 
@@ -295,14 +319,12 @@ export async function canFastForward(
   remote: string,
 ): Promise<boolean> {
   try {
-    const { promisify } = await import("node:util");
-    const { exec: execCb } = await import("node:child_process");
-    const execAsync = promisify(execCb);
-    await execAsync(
-      `git merge-base --is-ancestor "${local}" "${remote}"`,
+    // merge-base --is-ancestor: exit 0 => local is ancestor of remote
+    await execFileAsync(
+      "git",
+      ["merge-base", "--is-ancestor", local, remote],
       { cwd: repoPath, env: buildGitEnv() },
     );
-    // exit code 0 means local is ancestor of remote (can fast-forward)
     return true;
   } catch {
     return false;

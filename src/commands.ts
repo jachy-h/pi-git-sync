@@ -352,14 +352,21 @@ export class PiSyncCommands {
    *   - 已有 pi-sync.json 的标准同步仓库：拉取并 apply
    *   - 有内容但不是标准同步仓库：报错提示
    */
-  async init(gitUrl?: string): Promise<{ message: string; needsReload: boolean }> {
+  async init(gitUrl?: string): Promise<{
+    message: string;
+    needsReload: boolean;
+    /** 是否整体成功（单步最佳努力型失败，如 pi install 失败，仍视为成功） */
+    ok: boolean;
+    /** 用于调用方决定提示级别；不再靠字符串嗅探猜测 */
+    level: "info" | "warning" | "error";
+  }> {
     const defaultPath = join(this.agentDir, "..", "config-repo");
 
     // 已初始化：直接 apply
     if (await this.isAlreadyInitialized(defaultPath)) {
       const acquired = await this.lock.acquire("apply", 5000);
       if (!acquired) {
-        return { message: "Another sync operation is in progress.", needsReload: false };
+        return { message: "Another sync operation is in progress.", needsReload: false, ok: false, level: "warning" };
       }
       try {
         // Fetch latest first
@@ -374,7 +381,7 @@ export class PiSyncCommands {
         }
         const config = await loadPiSyncConfig(defaultPath);
         const applyResult = await this.applyCurrent(defaultPath, config, "init");
-        return { message: `Already initialized. Applied current config.\n${applyResult}`, needsReload: true };
+        return { message: `Already initialized. Applied current config.\n${applyResult}`, needsReload: true, ok: true, level: "info" };
       } finally {
         await this.lock.release();
       }
@@ -386,6 +393,8 @@ export class PiSyncCommands {
         message: "Enter your config repo Git URL to get started:\n" +
           "  /pisync init git@github.com:you/pi-config.git",
         needsReload: false,
+        ok: false,
+        level: "info",
       };
     }
 
@@ -398,12 +407,14 @@ export class PiSyncCommands {
           "  https://github.com/user/repo.git\n" +
           "  ssh://git@github.com/user/repo.git",
         needsReload: false,
+        ok: false,
+        level: "error",
       };
     }
 
     const acquired = await this.lock.acquire("init", 5000);
     if (!acquired) {
-      return { message: "Another sync operation is in progress.", needsReload: false };
+      return { message: "Another sync operation is in progress.", needsReload: false, ok: false, level: "warning" };
     }
 
     try {
@@ -422,6 +433,8 @@ export class PiSyncCommands {
               `Provided URL:   ${gitUrl}\n` +
               "To switch, remove the existing repo first: rm -rf ~/.pi/config-repo",
             needsReload: false,
+            ok: false,
+            level: "error",
           };
         }
         lines.push(`Config repo already exists at ${defaultPath}`);
@@ -444,6 +457,8 @@ export class PiSyncCommands {
               "Verify the URL, your network, and (for SSH URLs) that your key can authenticate.\n" +
               "Tip: run `ssh -T git@github.com` in a terminal to confirm access.",
             needsReload: false,
+            ok: false,
+            level: "error",
           };
         }
 
@@ -468,6 +483,8 @@ export class PiSyncCommands {
               "  - For SSH: ensure your key is reachable (try `ssh -T git@github.com` in a terminal).\n" +
               "  - For HTTPS: avoid URLs that require an interactive password prompt, or configure a credential helper.",
             needsReload: false,
+            ok: false,
+            level: "error",
           };
         }
         lines.push("Clone complete.");
@@ -505,6 +522,9 @@ export class PiSyncCommands {
               "Resolve the remote conflict/authentication issue, then run /pisync push.\n" +
               `Details: ${detail}`,
             needsReload: false,
+            // 本地脚手架已生成，只是没能推送到远端 —— 可恢复，不算硬失败。
+            ok: false,
+            level: "warning",
           };
         }
         lines.push("");
@@ -516,6 +536,8 @@ export class PiSyncCommands {
             "  1. Use an empty repository for auto-scaffolding, or\n" +
             "  2. Ensure the repo contains a valid pi-sync.json file.",
           needsReload: false,
+          ok: false,
+          level: "error",
         };
       } else {
         // Valid sync repo — pull latest
@@ -531,10 +553,12 @@ export class PiSyncCommands {
       // Install as Pi package
       lines.push("Installing as Pi package...");
       try {
-        const { exec: execCb } = await import("node:child_process");
+        const { execFile: execFileCb } = await import("node:child_process");
         const { promisify } = await import("node:util");
-        const execAsync = promisify(execCb);
-        await execAsync(`pi install "${defaultPath}"`, {
+        const execFileAsync = promisify(execFileCb);
+        // Use an argv array (not a shell string) so paths containing spaces
+        // are passed to `pi` verbatim instead of being shell-split.
+        await execFileAsync("pi", ["install", defaultPath], {
           timeout: 60000,
           env: { ...process.env },
         });
@@ -555,11 +579,13 @@ export class PiSyncCommands {
       lines.push("Setup complete! Your config is now synced.");
       lines.push("Use /pisync for day-to-day sync operations.");
 
-      return { message: lines.join("\n"), needsReload: true };
+      return { message: lines.join("\n"), needsReload: true, ok: true, level: "info" };
     } catch (err) {
       return {
         message: `Init failed: ${err instanceof Error ? err.message : "Unknown error"}`,
         needsReload: false,
+        ok: false,
+        level: "error",
       };
     } finally {
       await this.lock.release();
@@ -900,19 +926,14 @@ async function scaffoldConfigRepo(repoPath: string): Promise<void> {
  * 校验 Git URL 格式
  */
 function isValidGitUrl(url: string): boolean {
-  // git@host:path
-  if (/^git@[\w.-]+:[\w./-]+\.git$/.test(url)) return true;
-  // https://host/path.git
-  if (/^https?:\/\/[\w./-]+\.git$/.test(url)) return true;
-  // ssh://git@host/path.git
-  if (/^ssh:\/\/git@[\w./-]+\.git$/.test(url)) return true;
-  // git://host/path.git
-  if (/^git:\/\/[\w./-]+\.git$/.test(url)) return true;
-  // Without .git suffix
-  if (/^git@[\w.-]+:[\w./-]+$/.test(url)) return true;
-  if (/^https?:\/\/[\w./-]+$/.test(url)) return true;
-  if (/^ssh:\/\/git@[\w./-]+$/.test(url)) return true;
-  if (/^git:\/\/[\w./-]+$/.test(url)) return true;
+  // git@host:path  (SCP-like syntax; no explicit port in this form)
+  if (/^git@[\w.-]+:[\w./-]+(\.git)?$/.test(url)) return true;
+  // https://host[:port]/path(.git)?
+  if (/^https?:\/\/[\w.-]+(:\d+)?\/[\w./-]+(\.git)?$/.test(url)) return true;
+  // ssh://git@host[:port]/path(.git)?
+  if (/^ssh:\/\/git@[\w.-]+(:\d+)?\/[\w./-]+(\.git)?$/.test(url)) return true;
+  // git://host[:port]/path(.git)?
+  if (/^git:\/\/[\w.-]+(:\d+)?\/[\w./-]+(\.git)?$/.test(url)) return true;
   return false;
 }
 

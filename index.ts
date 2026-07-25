@@ -378,10 +378,8 @@ async function handleInit(
     ctx.ui.setWorkingMessage();
 
     // 如果不需要 URL（即已初始化），直接处理结果
-    if (quickResult.needsReload ||
-        !quickResult.message.includes("Enter your config repo Git URL")) {
-      const result = classifyResult(quickResult.message, "Init");
-      notifyResult(result, ctx);
+    if (!quickResult.message.includes("Enter your config repo Git URL")) {
+      notifyInitResult(quickResult, ctx);
       if (quickResult.needsReload) {
         await ctx.reload();
       }
@@ -404,12 +402,25 @@ async function handleInit(
   const initResult = await cmds.init(url);
   ctx.ui.setWorkingMessage();
 
-  const result = classifyResult(initResult.message, "Init");
-  notifyResult(result, ctx);
+  notifyInitResult(initResult, ctx);
 
   if (initResult.needsReload) {
     await ctx.reload();
   }
+}
+
+/**
+ * 展示 init 结果
+ *
+ * init 现在会明确返回 ok / level，调用方据此选择提示级别，不再通过对
+ * 多行消息做字符串嗅探来猜测结果类型——后者会把“第一行是 Cloning...、
+ * 后面某处出现了 failed:”这种情形误判为「初始化失败：Cloning...」，误导用户。
+ */
+function notifyInitResult(
+  result: { message: string; ok: boolean; level: "info" | "warning" | "error" },
+  ctx: ExtensionCommandContext,
+): void {
+  ctx.ui.notify(result.message, result.level);
 }
 
 // ========== 各命令处理器 ==========
