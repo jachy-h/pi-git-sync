@@ -115,13 +115,20 @@ export class PiSyncCommands {
       // best-effort
     }
 
-    return formatSyncStatus(
+    // 已同步内容目录（extensions/ skills/ prompts/ themes …）及其条目数量
+    const dirs = await gatherSyncedDirs(rp);
+
+    return formatSyncStatus({
       status,
-      settingsResult.changed,
+      config,
+      settingsChanges: settingsResult.changed,
       fileChanges,
-      state.lastAppliedCommit,
-      pkgDiff ?? undefined,
-    );
+      managedSettings: state.managedSettings,
+      lastAppliedCommit: state.lastAppliedCommit,
+      lastAppliedAt: state.lastAppliedAt,
+      dirs,
+      pkgDiff: pkgDiff ?? undefined,
+    });
   }
 
   // ============ diff ============
@@ -838,6 +845,51 @@ export class PiSyncCommands {
     }
 
     return lines.join("\n");
+  }
+}
+
+/**
+ * 收集 Pi 包加载的内容目录（extensions/ skills/ prompts/ themes …）及其条目数量。
+ *
+ * 从 repo 的 package.json `pi` 字段读取声明的目录，避免硬编码 scaffold 默认结构。
+ * best-effort：读取失败时返回空数组。
+ */
+async function gatherSyncedDirs(
+  repoPath: string,
+): Promise<Array<{ dir: string; count: number }>> {
+  try {
+    const { readdir } = await import("node:fs/promises");
+    const pkgPath = join(repoPath, "package.json");
+    if (!existsSync(pkgPath)) return [];
+    const pkg = JSON.parse(await readFile(pkgPath, "utf-8"));
+    const piField = pkg?.pi;
+    if (typeof piField !== "object" || piField === null) return [];
+
+    const dirs: Array<{ dir: string; count: number }> = [];
+    for (const entries of Object.values(piField)) {
+      if (!Array.isArray(entries)) continue;
+      for (const raw of entries) {
+        if (typeof raw !== "string") continue;
+        // 声明形如 "./extensions" → 解析为相对 repo 的真实目录名
+        const rel = raw.replace(/^\.\//, "").replace(/\/$/, "");
+        if (!rel) continue;
+        const abs = join(repoPath, rel);
+        if (!existsSync(abs)) continue;
+        let count = 0;
+        try {
+          for (const ent of await readdir(abs, { withFileTypes: true })) {
+            if (ent.name.startsWith(".")) continue;
+            count++;
+          }
+        } catch {
+          count = 0;
+        }
+        dirs.push({ dir: rel, count });
+      }
+    }
+    return dirs;
+  } catch {
+    return [];
   }
 }
 
