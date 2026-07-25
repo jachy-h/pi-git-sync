@@ -213,7 +213,7 @@ export function formatPackageDiff(diff: PackageDiff): string {
     }
   }
   if (diff.removed.length > 0) {
-    lines.push(`  Packages to remove (${diff.removed.length}):`);
+    lines.push(`  Local-only packages (not auto-removed) (${diff.removed.length}):`);
     for (const pkg of diff.removed) {
       lines.push(`    - ${pkg}`);
     }

@@ -30,9 +30,9 @@ export interface PackageDiff {
 export interface ReconcileResult {
   /** 成功安装的 packages */
   installed: string[];
-  /** 成功移除的 packages */
+  /** 保留字段，自动 reconcile 不会卸载 package */
   removed: string[];
-  /** 安装或移除时的错误 */
+  /** 安装或更新时的错误 */
   errors: string[];
 }
 
@@ -100,9 +100,13 @@ export async function getPackageDiff(
 }
 
 /**
- * 执行 package reconciliation（安装缺失的、移除多余的）
+ * 执行 package reconciliation（安装缺失的、更新已声明的）。
  *
- * 这个操作依赖 pi CLI，所以在运行时会尝试调用 `pi install` 和 `pi remove`。
+ * 不自动卸载本地 package：Pi 的 `packages` 同时承载本扩展和配置仓库
+ * 这类 bootstrap package，而同步仓库通常不会声明它们。自动删除会在本扩展
+ * 正在运行时把它自身从 settings.json 移除，导致下次启动 `/pisync` 消失。
+ *
+ * 这个操作依赖 pi CLI，所以在运行时会尝试调用 `pi install`（更新时会先移除同名旧版本）。
  * 如果 pi CLI 不可用，则跳过。
  */
 export async function reconcilePackages(
@@ -136,21 +140,6 @@ export async function reconcilePackages(
     } catch (err) {
       result.errors.push(
         `Failed to install ${pkg}: ${err instanceof Error ? err.message : "Unknown"}`,
-      );
-    }
-  }
-
-  // 移除多余的 packages
-  for (const pkg of diff.removed) {
-    try {
-      await execAsync(`pi remove ${pkg}`, {
-        env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
-        timeout: 60000,
-      });
-      result.removed.push(pkg);
-    } catch (err) {
-      result.errors.push(
-        `Failed to remove ${pkg}: ${err instanceof Error ? err.message : "Unknown"}`,
       );
     }
   }

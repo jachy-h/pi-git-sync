@@ -93,7 +93,7 @@ pi-config/
 | 共享 Settings | 分层合并（shared → platform → machine） |
 | `AGENTS.md`、`SYSTEM.md` | 原子复制到 agent 目录 |
 | `keybindings.json` | 原子复制到 agent 目录 |
-| 第三方 Packages | 声明依赖，自动 reconcile |
+| 第三方 Packages | 声明依赖，自动安装/更新（不会自动卸载本地 package） |
 
 ## 不同步的内容
 

@@ -93,7 +93,7 @@ Then commit + push:
 | Shared Settings | Layered merge (shared → platform → machine) |
 | `AGENTS.md`, `SYSTEM.md` | Atomic copy to agent directory |
 | `keybindings.json` | Atomic copy to agent directory |
-| Third-party Packages | Declared and auto-reconciled |
+| Third-party Packages | Declared dependencies, installed/updated automatically (local packages are never auto-removed) |
 
 ## What Never Gets Synced
 

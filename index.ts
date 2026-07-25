@@ -27,12 +27,12 @@ import { existsSync } from "node:fs";
 export default function (pi: ExtensionAPI) {
   const cmds = new PiSyncCommands();
 
-  // 状态栏远端更新提示
-  pi.on("session_start", async (_event, ctx) => {
-    await refreshStatusBarSimple(ctx.ui);
+  // pi-sync 不常驻显示状态；清理旧版本可能留下的状态项。
+  pi.on("session_start", (_event, ctx) => {
+    ctx.ui.setStatus("pi-sync", undefined);
   });
 
-  pi.on("session_shutdown", async (_event, ctx) => {
+  pi.on("session_shutdown", (_event, ctx) => {
     ctx.ui.setStatus("pi-sync", undefined);
   });
 
@@ -79,46 +79,8 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // 操作后刷新状态栏
-      await refreshStatusBar(ctx);
     },
   });
-}
-
-// ========== 状态栏 ==========
-
-/**
- * 刷新底部状态栏的 pi-sync 摘要（轻量版，接受 ui 对象）
- */
-async function refreshStatusBarSimple(ui: { setStatus(key: string, text: string | undefined): void }): Promise<void> {
-  try {
-    const rp = await getRepoPathSafe(getAgentDir());
-    if (!rp) {
-      ui.setStatus("pi-sync", undefined);
-      return;
-    }
-    const repoStatus = await gitStatus(rp);
-    if (repoStatus.remoteExists && repoStatus.behind > 0) {
-      ui.setStatus("pi-sync", `pi-sync: remote +${repoStatus.behind} ↓`);
-    } else if (repoStatus.remoteExists && repoStatus.ahead > 0) {
-      ui.setStatus("pi-sync", `pi-sync: local +${repoStatus.ahead} ↑`);
-    } else if (repoStatus.hasUncommittedChanges) {
-      ui.setStatus("pi-sync", "pi-sync: uncommitted •");
-    } else if (repoStatus.remoteExists) {
-      ui.setStatus("pi-sync", "pi-sync: up to date ✓");
-    } else {
-      ui.setStatus("pi-sync", "pi-sync: no remote");
-    }
-  } catch {
-    ui.setStatus("pi-sync", undefined);
-  }
-}
-
-/**
- * 刷新底部状态栏（命令 context 版本）
- */
-async function refreshStatusBar(ctx: ExtensionCommandContext): Promise<void> {
-  return refreshStatusBarSimple(ctx.ui);
 }
 
 // ========== 结果分类 ==========
@@ -222,7 +184,6 @@ async function showMenu(cmds: PiSyncCommands, ctx: ExtensionCommandContext): Pro
   if (!choice) return;
 
   await executeMenuChoice(choice, cmds, ctx);
-  await refreshStatusBar(ctx);
 }
 
 /**
