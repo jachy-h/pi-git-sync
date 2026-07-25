@@ -462,14 +462,17 @@ export class PiSyncCommands {
         // Empty repo — scaffold
         lines.push("Empty repository detected — scaffolding config structure...");
         await scaffoldConfigRepo(defaultPath);
-        await gitExec(defaultPath, ["add", "-A"]);
-        await gitExec(defaultPath, ["commit", "-m", "pi-sync: initial config scaffold"]);
+        await gitCommit(defaultPath, "pi-sync: initial config scaffold");
         try {
-          const status = await gitStatus(defaultPath);
-          await gitPush(defaultPath, status.branch);
+          await gitPush(defaultPath, "main");
           lines.push("Scaffold pushed to remote.");
         } catch {
-          lines.push("Scaffold committed locally (push skipped — remote may not be reachable).");
+          try {
+            await gitPush(defaultPath, "master");
+            lines.push("Scaffold pushed to remote.");
+          } catch {
+            lines.push("Scaffold committed locally (push skipped — remote may not be reachable).");
+          }
         }
         lines.push("");
       } else if (repoState === "invalid") {

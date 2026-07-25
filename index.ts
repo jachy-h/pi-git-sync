@@ -5,6 +5,7 @@
  *
  * 命令：
  *   /pisync          - TUI 操作菜单
+ *   /pisync init     - 初始化或克隆配置仓库
  *   /pisync status   - 显示详情状态
  *   /pisync diff     - 显示差异
  *   /pisync pull     - 从远端拉取
@@ -28,28 +29,7 @@ export default function (pi: ExtensionAPI) {
 
   // 状态栏远端更新提示
   pi.on("session_start", async (_event, ctx) => {
-    try {
-      const agentDir = getAgentDir();
-      const state = await loadState(agentDir);
-      if (!state.repoPath || !existsSync(state.repoPath)) return;
-
-      const repoStatus = await gitStatus(state.repoPath);
-      if (repoStatus.remoteExists && repoStatus.behind > 0) {
-        ctx.ui.setStatus(
-          "pi-sync",
-          `pi-sync: remote +${repoStatus.behind} commit(s)`,
-        );
-      } else if (repoStatus.remoteExists && repoStatus.ahead > 0) {
-        ctx.ui.setStatus(
-          "pi-sync",
-          `pi-sync: local +${repoStatus.ahead} (unpushed)`,
-        );
-      } else if (repoStatus.remoteExists && repoStatus.ahead === 0 && repoStatus.behind === 0) {
-        ctx.ui.setStatus("pi-sync", "pi-sync: up to date");
-      }
-    } catch {
-      // Silently ignore — status check is best-effort
-    }
+    await refreshStatusBarSimple(ctx.ui);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -67,31 +47,166 @@ export default function (pi: ExtensionAPI) {
       switch (subCommand) {
         case "init":
           await handleInit(cmds, subArgs, ctx);
-          return;
+          break;
         case "status":
-          return handleRoute(await cmds.status(), ctx);
+          await handleStatus(cmds, ctx);
+          break;
         case "diff":
-          return handleRoute(await cmds.diff(), ctx);
+          await handleDiff(cmds, ctx);
+          break;
         case "pull":
-          return handleRouteWithConfirm("pull", await cmds.pull(), ctx);
+          await handlePull(cmds, ctx);
+          break;
         case "push":
-          return handleRoute(await cmds.push(undefined, subArgs), ctx);
+          await handlePush(cmds, subArgs, ctx);
+          break;
         case "capture":
-          return handleRoute(await cmds.capture(), ctx);
+          await handleCapture(cmds, ctx);
+          break;
         case "doctor":
-          return handleRoute(await cmds.doctor(), ctx);
+          await handleDoctor(cmds, ctx);
+          break;
         case "rollback":
-          return handleRouteWithConfirmAndReload("rollback", await cmds.rollback(), ctx);
+          await handleRollback(cmds, ctx);
+          break;
         case "rollback-list":
-          return handleRoute(await cmds.rollbackList(), ctx);
+          await handleRollbackList(cmds, ctx);
+          break;
         default: {
           // 无子命令时显示 TUI 操作菜单
           await showMenu(cmds, ctx);
-          return;
+          break;
         }
       }
+
+      // 操作后刷新状态栏
+      await refreshStatusBar(ctx);
     },
   });
+}
+
+// ========== 状态栏 ==========
+
+/**
+ * 刷新底部状态栏的 pi-sync 摘要（轻量版，接受 ui 对象）
+ */
+async function refreshStatusBarSimple(ui: { setStatus(key: string, text: string | undefined): void }): Promise<void> {
+  try {
+    const rp = await getRepoPathSafe(getAgentDir());
+    if (!rp) {
+      ui.setStatus("pi-sync", undefined);
+      return;
+    }
+    const repoStatus = await gitStatus(rp);
+    if (repoStatus.remoteExists && repoStatus.behind > 0) {
+      ui.setStatus("pi-sync", `pi-sync: remote +${repoStatus.behind} ↓`);
+    } else if (repoStatus.remoteExists && repoStatus.ahead > 0) {
+      ui.setStatus("pi-sync", `pi-sync: local +${repoStatus.ahead} ↑`);
+    } else if (repoStatus.hasUncommittedChanges) {
+      ui.setStatus("pi-sync", "pi-sync: uncommitted •");
+    } else if (repoStatus.remoteExists) {
+      ui.setStatus("pi-sync", "pi-sync: up to date ✓");
+    } else {
+      ui.setStatus("pi-sync", "pi-sync: no remote");
+    }
+  } catch {
+    ui.setStatus("pi-sync", undefined);
+  }
+}
+
+/**
+ * 刷新底部状态栏（命令 context 版本）
+ */
+async function refreshStatusBar(ctx: ExtensionCommandContext): Promise<void> {
+  return refreshStatusBarSimple(ctx.ui);
+}
+
+// ========== 结果分类 ==========
+
+type ResultKind = "success" | "warning" | "error" | "detail";
+
+interface ClassifiedResult {
+  kind: ResultKind;
+  /** 一行摘要，用于 notify + 状态栏（detail 类型不需要 notify） */
+  summary: string;
+  /** 完整详情，detail 类型时直接 notify 展示 */
+  detail: string;
+}
+
+/**
+ * 根据命令输出内容判断结果类型
+ */
+function classifyResult(output: string, operation: string): ClassifiedResult {
+  const lower = output.toLowerCase();
+
+  // 错误
+  if (
+    lower.includes("error:") || lower.includes("failed:") ||
+    lower.includes("fatal:") || lower.includes("blocked") ||
+    lower.includes("another sync operation is in progress")
+  ) {
+    // 提取第一行作为简短摘要
+    const firstLine = output.split("\n")[0]!.trim();
+    return { kind: "error", summary: `${operation} failed: ${firstLine}`, detail: output };
+  }
+
+  // 警告（无变化 / 已是最新 / 被取消）
+  if (
+    lower.includes("already up to date") ||
+    lower.includes("no changes") ||
+    lower.includes("up to date") ||
+    lower.includes("cancelled") ||
+    lower.includes("nothing to")
+  ) {
+    return { kind: "warning", summary: `${operation}: no changes`, detail: output };
+  }
+
+  // 无仓库配置
+  if (lower.includes("no config repo")) {
+    return { kind: "warning", summary: "No config repo configured", detail: output };
+  }
+
+  // 成功
+  const successPatterns: Record<string, string> = {
+    "pushed successfully": `${operation}: pushed`,
+    "pulled and applied": `${operation}: synced`,
+    "rolled back": `${operation}: restored`,
+    "capture complete": `${operation}: done`,
+    "setup complete": `${operation}: ready`,
+    "already initialized": `${operation}: applied`,
+    "scaffold pushed": `${operation}: ready`,
+    "scaffold committed": `${operation}: ready (not pushed)`,
+    "backup created": `${operation}: applied`,
+    "applied successfully": `${operation}: applied`,
+  };
+
+  for (const [pattern, summary] of Object.entries(successPatterns)) {
+    if (lower.includes(pattern)) {
+      return { kind: "success", summary, detail: output };
+    }
+  }
+
+  // 默认：详情类（status / diff / doctor 等纯信息展示）
+  return { kind: "detail", summary: "", detail: output };
+}
+
+/**
+ * 统一通知：根据分类结果选择提示方式
+ * - success: notify("info") 简短摘要
+ * - warning: notify("warning") 简短摘要
+ * - error:   notify("error") 简短摘要
+ * - detail:  notify("info") 完整内容（status/diff/doctor 等信息展示）
+ */
+function notifyResult(result: ClassifiedResult, ctx: ExtensionCommandContext): void {
+  if (result.kind === "detail") {
+    ctx.ui.notify(result.detail, "info");
+  } else if (result.kind === "success") {
+    ctx.ui.notify(result.summary, "info");
+  } else if (result.kind === "warning") {
+    ctx.ui.notify(result.summary, "warning");
+  } else {
+    ctx.ui.notify(result.summary, "error");
+  }
 }
 
 /**
@@ -107,6 +222,7 @@ async function showMenu(cmds: PiSyncCommands, ctx: ExtensionCommandContext): Pro
   if (!choice) return;
 
   await executeMenuChoice(choice, cmds, ctx);
+  await refreshStatusBar(ctx);
 }
 
 /**
@@ -114,11 +230,11 @@ async function showMenu(cmds: PiSyncCommands, ctx: ExtensionCommandContext): Pro
  */
 async function getMenuChoice(ctx: ExtensionCommandContext): Promise<string | null> {
   const menuOptions = [
+    { value: "init", label: "Init" },
     { value: "status", label: "Status" },
     { value: "diff", label: "Diff" },
     { value: "pull", label: "Pull" },
     { value: "push", label: "Push" },
-    { value: "init", label: "Init" },
     { value: "capture", label: "Capture" },
     { value: "doctor", label: "Doctor" },
     { value: "rollback", label: "Rollback" },
@@ -154,11 +270,11 @@ async function showTuiMenu(
 ): Promise<string | null> {
   const items: SelectItem[] = options.map((opt) => {
     const descriptions: Record<string, string> = {
+      init: "Initialize or clone a config repo",
       status: "Show detailed sync status",
       diff: "Show pending changes before sync",
       pull: "Pull and apply remote changes",
       push: "Commit and push local changes",
-      init: "Initialize or clone a config repo",
       capture: "Import local config into repo",
       doctor: "Run diagnostic checks",
       rollback: "Restore previous backup",
@@ -256,28 +372,28 @@ async function executeMenuChoice(
 ): Promise<void> {
   switch (choice) {
     case "status":
-      ctx.ui.notify(await cmds.status(), "info");
+      await handleStatus(cmds, ctx);
       return;
     case "diff":
-      ctx.ui.notify(await cmds.diff(), "info");
+      await handleDiff(cmds, ctx);
       return;
     case "pull":
-      await handleRouteWithConfirm("pull", await cmds.pull(), ctx);
+      await handlePull(cmds, ctx);
       return;
     case "push":
-      ctx.ui.notify(await cmds.push(), "info");
+      await handlePush(cmds, undefined, ctx);
       return;
     case "init":
       await handleInit(cmds, undefined, ctx);
       return;
     case "capture":
-      ctx.ui.notify(await cmds.capture(), "info");
+      await handleCapture(cmds, ctx);
       return;
     case "doctor":
-      ctx.ui.notify(await cmds.doctor(), "info");
+      await handleDoctor(cmds, ctx);
       return;
     case "rollback":
-      await handleRouteWithConfirmAndReload("rollback", await cmds.rollback(), ctx);
+      await handleRollback(cmds, ctx);
       return;
   }
 }
@@ -296,16 +412,17 @@ async function handleInit(
 
   if (!url) {
     // 未提供 URL — 先尝试直接 init（已初始化场景会直接 apply）
+    ctx.ui.setWorkingMessage("Checking pi-sync status...");
     const quickResult = await cmds.init();
+    ctx.ui.setWorkingMessage();
 
     // 如果不需要 URL（即已初始化），直接处理结果
     if (quickResult.needsReload ||
         !quickResult.message.includes("Enter your config repo Git URL")) {
+      const result = classifyResult(quickResult.message, "Init");
+      notifyResult(result, ctx);
       if (quickResult.needsReload) {
-        ctx.ui.notify(quickResult.message, "info");
         await ctx.reload();
-      } else {
-        ctx.ui.notify(quickResult.message, "info");
       }
       return;
     }
@@ -317,94 +434,117 @@ async function handleInit(
     );
 
     if (!url) {
-      ctx.ui.notify("Init cancelled.", "info");
+      ctx.ui.notify("Init cancelled.", "warning");
       return;
     }
   }
 
-  const result = await cmds.init(url);
+  ctx.ui.setWorkingMessage("Initializing pi-sync...");
+  const initResult = await cmds.init(url);
+  ctx.ui.setWorkingMessage();
 
-  if (result.needsReload) {
-    ctx.ui.notify(result.message, "info");
+  const result = classifyResult(initResult.message, "Init");
+  notifyResult(result, ctx);
+
+  if (initResult.needsReload) {
     await ctx.reload();
+  }
+}
+
+// ========== 各命令处理器 ==========
+
+/** status / diff / doctor / rollback-list：纯信息展示，直接 notify 完整内容 */
+async function handleStatus(cmds: PiSyncCommands, ctx: ExtensionCommandContext): Promise<void> {
+  const output = await cmds.status();
+  ctx.ui.notify(output, "info");
+}
+
+async function handleDiff(cmds: PiSyncCommands, ctx: ExtensionCommandContext): Promise<void> {
+  const output = await cmds.diff();
+  ctx.ui.notify(output, "info");
+}
+
+async function handleDoctor(cmds: PiSyncCommands, ctx: ExtensionCommandContext): Promise<void> {
+  const output = await cmds.doctor();
+  ctx.ui.notify(output, "info");
+}
+
+async function handleRollbackList(cmds: PiSyncCommands, ctx: ExtensionCommandContext): Promise<void> {
+  const output = await cmds.rollbackList();
+  ctx.ui.notify(output, "info");
+}
+
+/** push / capture：成功/警告/错误 简要提示 */
+async function handlePush(
+  cmds: PiSyncCommands,
+  message: string | undefined,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  ctx.ui.setWorkingMessage("Pushing...");
+  const output = await cmds.push(undefined, message);
+  ctx.ui.setWorkingMessage();
+  const result = classifyResult(output, "Push");
+  notifyResult(result, ctx);
+}
+
+async function handleCapture(cmds: PiSyncCommands, ctx: ExtensionCommandContext): Promise<void> {
+  ctx.ui.setWorkingMessage("Capturing...");
+  const output = await cmds.capture();
+  ctx.ui.setWorkingMessage();
+  const result = classifyResult(output, "Capture");
+  notifyResult(result, ctx);
+}
+
+/** pull：先展示 diff 摘要，再确认 */
+async function handlePull(cmds: PiSyncCommands, ctx: ExtensionCommandContext): Promise<void> {
+  ctx.ui.setWorkingMessage("Checking remote...");
+  const output = await cmds.pull();
+  ctx.ui.setWorkingMessage();
+
+  const result = classifyResult(output, "Pull");
+
+  // 错误或无需操作：直接通知
+  if (result.kind === "error" || result.kind === "warning") {
+    notifyResult(result, ctx);
     return;
   }
 
-  ctx.ui.notify(result.message, "info");
-}
+  // 成功（有新内容）：展示完整 diff 并确认
+  ctx.ui.notify(output, "info");
 
-/**
- * 不需要 reload 的命令结果处理
- */
-async function handleRoute(result: string, ctx: ExtensionCommandContext): Promise<void> {
-  ctx.ui.notify(result, "info");
-}
-
-/**
- * 需要 reload 的命令结果处理
- */
-async function handleRouteWithReload(result: string, ctx: ExtensionCommandContext): Promise<void> {
-  ctx.ui.notify(result, "info");
+  // pull 已经在 cmds.pull() 中完成了，这里只是确认通知
+  notifyResult(result, ctx);
   await ctx.reload();
-  return;
 }
 
-/**
- * 需要用户确认的操作（不需要 reload）
- */
-async function handleRouteWithConfirm(
-  operation: string,
-  result: string,
-  ctx: ExtensionCommandContext,
-): Promise<void> {
-  // 先展示 diff/result
-  ctx.ui.notify(result, "info");
+/** rollback：先展示备份信息，再确认 + reload */
+async function handleRollback(cmds: PiSyncCommands, ctx: ExtensionCommandContext): Promise<void> {
+  const output = await cmds.rollback();
+  const result = classifyResult(output, "Rollback");
 
-  // 如果结果包含错误或无需操作，跳过确认
-  if (
-    result.includes("error:") ||
-    result.includes("failed:") ||
-    result.includes("Already up to date") ||
-    result.includes("No changes") ||
-    result.includes("blocked")
-  ) {
+  if (result.kind === "warning" && output.includes("No backups")) {
+    ctx.ui.notify("No backups available.", "warning");
+    return;
+  }
+
+  // 展示完整回滚信息
+  ctx.ui.notify(output, "info");
+
+  if (result.kind === "error") {
+    notifyResult(result, ctx);
     return;
   }
 
   const confirmed = await ctx.ui.confirm(
-    `pi-sync: Confirm ${operation}`,
-    "Apply these changes?",
+    "pi-sync: Confirm rollback",
+    "Rollback to the previous backup? Current state will be backed up first.",
   );
 
   if (!confirmed) {
-    ctx.ui.notify(`${operation} cancelled.`, "warning");
-  }
-}
-
-/**
- * 需要用户确认的操作（需要 reload）
- */
-async function handleRouteWithConfirmAndReload(
-  operation: string,
-  result: string,
-  ctx: ExtensionCommandContext,
-): Promise<void> {
-  ctx.ui.notify(result, "info");
-
-  if (result.includes("No backups")) {
+    ctx.ui.notify("Rollback cancelled.", "warning");
     return;
   }
 
-  const confirmed = await ctx.ui.confirm(
-    `pi-sync: Confirm ${operation}`,
-    `Rollback to the previous backup? Current state will be backed up first.`,
-  );
-
-  if (!confirmed) {
-    ctx.ui.notify(`${operation} cancelled.`, "warning");
-    return;
-  }
-
+  notifyResult(result, ctx);
   await ctx.reload();
-  return;
 }
