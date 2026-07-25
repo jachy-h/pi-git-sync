@@ -2,44 +2,37 @@ import { describe, it, expect } from "vitest";
 import { isDenied, scanSecrets, findDeniedFiles } from "../src/security.ts";
 
 describe("isDenied", () => {
-  const denyPatterns = [
-    "auth.json",
-    "trust.json",
-    "sessions/**",
-    "**/.env",
-    "**/*.pem",
-    "**/id_rsa",
-  ];
-
-  it("should deny exact matches", () => {
-    expect(isDenied("auth.json", denyPatterns)).toBe(true);
-    expect(isDenied("trust.json", denyPatterns)).toBe(true);
+  it("should deny built-in hard deny files (no extra patterns needed)", () => {
+    expect(isDenied("auth.json")).toBe(true);
+    expect(isDenied("trust.json")).toBe(true);
+    expect(isDenied(".env")).toBe(true);
+    expect(isDenied("subdir/.env")).toBe(true);
+    expect(isDenied("key.pem")).toBe(true);
+    expect(isDenied("id_rsa")).toBe(true);
+    expect(isDenied(".ssh/id_rsa")).toBe(true);
+    expect(isDenied("sessions/foo.jsonl")).toBe(true);
+    expect(isDenied("sessions/a/b/c.jsonl")).toBe(true);
+    expect(isDenied("id_ed25519")).toBe(true);
   });
 
-  it("should allow non-matching files", () => {
-    expect(isDenied("settings.json", denyPatterns)).toBe(false);
-    expect(isDenied("AGENTS.md", denyPatterns)).toBe(false);
+  it("should allow non-denied files", () => {
+    expect(isDenied("settings.json")).toBe(false);
+    expect(isDenied("AGENTS.md")).toBe(false);
+    expect(isDenied("SYSTEM.md")).toBe(false);
+    expect(isDenied("extensions/example.ts")).toBe(false);
   });
 
-  it("should deny sessions subdirectories", () => {
-    expect(isDenied("sessions/foo.jsonl", denyPatterns)).toBe(true);
-    expect(isDenied("sessions/a/b/c.jsonl", denyPatterns)).toBe(true);
+  it("should accept extra deny patterns", () => {
+    // Custom extra deny pattern
+    expect(isDenied("secrets.json", ["secrets.json"])).toBe(true);
+    // Built-in hard deny still applies
+    expect(isDenied("auth.json", [])).toBe(true);
   });
 
-  it("should deny .env anywhere", () => {
-    expect(isDenied(".env", denyPatterns)).toBe(true);
-    expect(isDenied("dir/.env", denyPatterns)).toBe(true);
-    expect(isDenied("a/b/.env", denyPatterns)).toBe(true);
-  });
-
-  it("should deny .pem files", () => {
-    expect(isDenied("key.pem", denyPatterns)).toBe(true);
-    expect(isDenied("certs/key.pem", denyPatterns)).toBe(true);
-  });
-
-  it("should deny id_rsa files", () => {
-    expect(isDenied("id_rsa", denyPatterns)).toBe(true);
-    expect(isDenied(".ssh/id_rsa", denyPatterns)).toBe(true);
+  it("should deny node_modules and npm/git directories", () => {
+    expect(isDenied("node_modules/some-pkg/index.js")).toBe(true);
+    expect(isDenied("npm/something")).toBe(true);
+    expect(isDenied("git/something")).toBe(true);
   });
 });
 
@@ -49,7 +42,6 @@ describe("scanSecrets", () => {
       'GITHUB_TOKEN=ghp_1234567890abcdef1234567890abcdef123456',
       ".env",
     );
-    // That's 44 chars after ghp_, the pattern needs 36+ so: 4 + 40 = 44, avoid AWS 40-char pattern by using 39 chars
     const ghTokenFindings = findings.filter((f) => f.type === "GitHub Token");
     expect(ghTokenFindings).toHaveLength(1);
     expect(ghTokenFindings[0]!.type).toBe("GitHub Token");
@@ -93,17 +85,21 @@ describe("scanSecrets", () => {
 });
 
 describe("findDeniedFiles", () => {
-  it("should filter denied files", () => {
+  it("should filter files denied by built-in hard deny", () => {
     const files = ["auth.json", "settings.json", "AGENTS.md", ".env"];
-    const deny = ["auth.json", "**/.env"];
-    const denied = findDeniedFiles(files, deny);
+    const denied = findDeniedFiles(files);
     expect(denied).toEqual(["auth.json", ".env"]);
   });
 
   it("should return empty when no denied files", () => {
     const files = ["settings.json", "AGENTS.md", "SYSTEM.md"];
-    const deny = ["auth.json", "**/.env"];
-    const denied = findDeniedFiles(files, deny);
+    const denied = findDeniedFiles(files);
     expect(denied).toEqual([]);
+  });
+
+  it("should detect built-in deny patterns like sessions/ and .pem", () => {
+    const files = ["sessions/chat.jsonl", "certs/ca.pem", "AGENTS.md"];
+    const denied = findDeniedFiles(files);
+    expect(denied).toEqual(["sessions/chat.jsonl", "certs/ca.pem"]);
   });
 });

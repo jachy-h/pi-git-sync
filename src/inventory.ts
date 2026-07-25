@@ -359,6 +359,7 @@ export function getApplicableFiles(comparisons: FileComparison[]): FileCompariso
       c.changeType === "remote_only" ||
       c.changeType === "remote_created" ||
       c.changeType === "remote_deleted" ||
+      c.changeType === "both_deleted" ||
       c.changeType === "converged",
   );
 }

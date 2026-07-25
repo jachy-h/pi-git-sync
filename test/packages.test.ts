@@ -6,27 +6,30 @@ import { randomBytes } from "node:crypto";
 import { getPackageDiff } from "../src/packages.ts";
 import type { PiSyncConfig } from "../src/config.ts";
 
+function makeV2Config(overrides?: Partial<PiSyncConfig>): PiSyncConfig {
+  return {
+    schemaVersion: 2,
+    branch: "main",
+    root: "sync",
+    include: ["settings.json"],
+    exclude: [],
+    delete: "tracked",
+    security: { scanSecretsBeforePush: false },
+    ...overrides,
+  };
+}
+
 describe("getPackageDiff", () => {
   let repoPath: string;
   let agentDir: string;
-  const config: PiSyncConfig = {
-    schemaVersion: 1,
-    branch: "main",
-    settings: {
-      source: "config/settings.shared.json",
-      strategy: "managed-keys",
-      preserve: [],
-    },
-    files: [],
-    security: { deny: [], scanSecretsBeforePush: false },
-  };
+  const config = makeV2Config();
 
   beforeEach(async () => {
     const base = tmpdir();
     repoPath = join(base, `pi-sync-pkg-repo-${randomBytes(4).toString("hex")}`);
     agentDir = join(base, `pi-sync-pkg-agent-${randomBytes(4).toString("hex")}`);
 
-    await mkdir(join(repoPath, "config"), { recursive: true });
+    await mkdir(join(repoPath, "sync"), { recursive: true });
     await mkdir(agentDir, { recursive: true });
   });
 
@@ -37,7 +40,7 @@ describe("getPackageDiff", () => {
 
   it("should detect added packages", async () => {
     await writeFile(
-      join(repoPath, "config", "settings.shared.json"),
+      join(repoPath, "sync", "settings.json"),
       JSON.stringify({
         packages: ["npm:test-package@1.0.0", "git:github.com/user/repo"],
       }),
@@ -55,7 +58,7 @@ describe("getPackageDiff", () => {
 
   it("should detect removed packages", async () => {
     await writeFile(
-      join(repoPath, "config", "settings.shared.json"),
+      join(repoPath, "sync", "settings.json"),
       JSON.stringify({}),
     );
     await writeFile(
@@ -72,7 +75,7 @@ describe("getPackageDiff", () => {
 
   it("should detect unchanged packages", async () => {
     await writeFile(
-      join(repoPath, "config", "settings.shared.json"),
+      join(repoPath, "sync", "settings.json"),
       JSON.stringify({
         packages: ["npm:test-package@1.0.0"],
       }),
@@ -92,7 +95,7 @@ describe("getPackageDiff", () => {
 
   it("should detect changed packages (same name, different source)", async () => {
     await writeFile(
-      join(repoPath, "config", "settings.shared.json"),
+      join(repoPath, "sync", "settings.json"),
       JSON.stringify({
         packages: ["npm:test-package@2.0.0"],
       }),
@@ -112,7 +115,7 @@ describe("getPackageDiff", () => {
 
   it("should handle package objects with source field", async () => {
     await writeFile(
-      join(repoPath, "config", "settings.shared.json"),
+      join(repoPath, "sync", "settings.json"),
       JSON.stringify({
         packages: [
           "npm:simple-pkg",
@@ -134,7 +137,6 @@ describe("getPackageDiff", () => {
   });
 
   it("should handle missing files gracefully", async () => {
-    // No settings files exist at all
     const diff = await getPackageDiff(repoPath, agentDir, config);
     expect(diff.added).toHaveLength(0);
     expect(diff.removed).toHaveLength(0);
@@ -143,7 +145,7 @@ describe("getPackageDiff", () => {
 
   it("should handle git URL formats consistently", async () => {
     await writeFile(
-      join(repoPath, "config", "settings.shared.json"),
+      join(repoPath, "sync", "settings.json"),
       JSON.stringify({
         packages: ["git:github.com/user/repo@v1"],
       }),
@@ -159,6 +161,6 @@ describe("getPackageDiff", () => {
     // Both normalize to "github.com/user/repo"
     expect(diff.added).toHaveLength(0);
     expect(diff.removed).toHaveLength(0);
-    expect(diff.changed).toHaveLength(1); // source strings differ: "git:..." vs "https://..."
+    expect(diff.changed).toHaveLength(1);
   });
 });

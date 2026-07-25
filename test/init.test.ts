@@ -199,6 +199,6 @@ describe("PiSyncCommands.init (end-to-end with a real git remote)", () => {
     const msg = (
       await execFile("git", ["log", "-1", "--pretty=%B"], { cwd: localRepoDir })
     ).stdout.trim();
-    expect(msg).toBe("pi-sync: initial config scaffold");
+    expect(msg).toBe("pi-sync: initial config scaffold (v2)");
   }, 30000);
 });

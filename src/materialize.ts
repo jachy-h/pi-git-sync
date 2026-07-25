@@ -170,7 +170,8 @@ export async function planMaterialize(
         }
         break;
       }
-      case "remote_deleted": {
+      case "remote_deleted":
+      case "both_deleted": {
         // repo 中删除了已管理的文件 → agent 中也删除
         if (config.delete === "tracked") {
           const baseline = state.files[relPath];

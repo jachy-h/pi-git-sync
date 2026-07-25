@@ -1026,6 +1026,7 @@ function isValidGitUrl(url: string): boolean {
   if (/^git@[\w.-]+:[\w./-]+(\.git)?$/.test(url)) return true;
   if (/^https?:\/\/[\w.-]+(:\d+)?\/[\w./-]+(\.git)?$/.test(url)) return true;
   if (/^ssh:\/\/git@[\w.-]+(:\d+)?\/[\w./-]+(\.git)?$/.test(url)) return true;
+  if (/^git:\/\/[\w.-]+(:\d+)?\/[\w./-]+(\.git)?$/.test(url)) return true;
   return false;
 }
 

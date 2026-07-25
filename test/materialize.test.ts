@@ -4,7 +4,35 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { materializeFiles, atomicWrite, backupFile, diffFiles } from "../src/materialize.ts";
+import { atomicWrite, planMaterialize, executeMaterialize, readAgentFile } from "../src/materialize.ts";
+import type { PiSyncConfig } from "../src/config.ts";
+import type { SyncState } from "../src/state.ts";
+
+function makeV2Config(overrides?: Partial<PiSyncConfig>): PiSyncConfig {
+  return {
+    schemaVersion: 2,
+    branch: "main",
+    root: "sync",
+    include: ["**"],
+    exclude: [],
+    delete: "tracked",
+    security: { scanSecretsBeforePush: false },
+    ...overrides,
+  };
+}
+
+function makeEmptyState(repoPath: string): SyncState {
+  return {
+    schemaVersion: 2,
+    repoPath,
+    branch: "main",
+    lastSyncedCommit: null,
+    lastSyncedAt: null,
+    files: {},
+    pendingOperation: null,
+    lastBackup: null,
+  };
+}
 
 describe("atomicWrite", () => {
   let targetDir: string;
@@ -44,98 +72,110 @@ describe("atomicWrite", () => {
   });
 });
 
-describe("materializeFiles", () => {
+describe("planMaterialize + executeMaterialize", () => {
   let repoPath: string;
   let agentDir: string;
-  let backupDir: string;
+  let syncDir: string;
 
   beforeEach(async () => {
     const base = tmpdir();
     repoPath = join(base, `pi-sync-repo-${randomBytes(4).toString("hex")}`);
     agentDir = join(base, `pi-sync-agent-${randomBytes(4).toString("hex")}`);
-    backupDir = join(base, `pi-sync-backup-${randomBytes(4).toString("hex")}`);
+    syncDir = join(repoPath, "sync");
 
-    await mkdir(repoPath, { recursive: true });
+    await mkdir(syncDir, { recursive: true });
     await mkdir(agentDir, { recursive: true });
-    await mkdir(backupDir, { recursive: true });
   });
 
   afterEach(async () => {
     await rm(repoPath, { recursive: true, force: true });
     await rm(agentDir, { recursive: true, force: true });
-    await rm(backupDir, { recursive: true, force: true });
   });
 
-  it("should apply files from repo to agent dir", async () => {
-    // Create source file
-    const filesDir = join(repoPath, "files");
-    await mkdir(filesDir, { recursive: true });
-    await writeFile(join(filesDir, "AGENTS.md"), "# AGENTS");
+  it("should apply files from repo sync/ to agent dir", async () => {
+    await writeFile(join(syncDir, "AGENTS.md"), "# AGENTS");
 
-    const result = await materializeFiles(
-      repoPath,
-      agentDir,
-      [{ source: "files/AGENTS.md", target: "AGENTS.md" }],
-      backupDir,
-    );
+    const config = makeV2Config({ include: ["AGENTS.md", "**"] });
+    const state = makeEmptyState(repoPath);
 
-    expect(result.applied).toEqual(["AGENTS.md"]);
+    const plan = await planMaterialize(agentDir, repoPath, config, state);
+
+    // Should have a write plan for AGENTS.md
+    const writePlan = plan.toWrite.find((w) => w.relativePath === "AGENTS.md");
+    expect(writePlan).toBeDefined();
+
+    const result = await executeMaterialize(agentDir, plan);
+    expect(result.written).toContain("AGENTS.md");
     expect(existsSync(join(agentDir, "AGENTS.md"))).toBe(true);
+
     const content = await readFile(join(agentDir, "AGENTS.md"), "utf-8");
     expect(content).toBe("# AGENTS");
   });
 
-  it("should skip optional files when source not found", async () => {
-    const result = await materializeFiles(
-      repoPath,
-      agentDir,
-      [
-        { source: "files/SYSTEM.md", target: "SYSTEM.md", optional: true },
-      ],
-      backupDir,
-    );
+  it("should skip files not in include patterns", async () => {
+    await writeFile(join(syncDir, "AGENTS.md"), "# AGENTS");
 
-    expect(result.skipped).toEqual(["SYSTEM.md"]);
-    expect(result.failed).toHaveLength(0);
+    const config = makeV2Config({ include: ["settings.json"] }); // AGENTS.md not in include
+    const state = makeEmptyState(repoPath);
+
+    const plan = await planMaterialize(agentDir, repoPath, config, state);
+    expect(plan.toWrite).toHaveLength(0);
   });
 
-  it("should fail on non-optional missing source", async () => {
-    const result = await materializeFiles(
-      repoPath,
-      agentDir,
-      [{ source: "files/missing.md", target: "missing.md" }],
-      backupDir,
-    );
+  it("should handle tracked deletion", async () => {
+    // Baseline had AGENTS.md, but repo has deleted it
+    const state = makeEmptyState(repoPath);
+    state.files["AGENTS.md"] = { sha256: "abc123", mode: 0o644 };
 
-    expect(result.failed).toHaveLength(1);
-    expect(result.failed[0]!.file).toBe("missing.md");
+    const config = makeV2Config({
+      include: ["AGENTS.md"],
+      delete: "tracked",
+    });
+
+    const plan = await planMaterialize(agentDir, repoPath, config, state);
+    // Should plan to delete since it was tracked and repo doesn't have it
+    const deletePlan = plan.toDelete.find((d) => d === "AGENTS.md");
+    expect(deletePlan).toBeDefined();
+  });
+
+  it("should not delete untracked files", async () => {
+    // Create agent file not in baseline
+    await writeFile(join(agentDir, "untracked.md"), "# untracked");
+
+    const config = makeV2Config({ include: ["untracked.md"] });
+    const state = makeEmptyState(repoPath);
+    // No baseline entry — untracked
+
+    const plan = await planMaterialize(agentDir, repoPath, config, state);
+    // Should not plan to delete untracked files just because repo doesn't have them
+    const deletePlan = plan.toDelete.find((d) => d === "untracked.md");
+    expect(deletePlan).toBeUndefined();
   });
 });
 
-describe("backupFile", () => {
-  let backupDir: string;
+describe("readAgentFile", () => {
+  let agentDir: string;
 
   beforeEach(async () => {
-    backupDir = join(tmpdir(), `pi-sync-backup-${randomBytes(4).toString("hex")}`);
-    await mkdir(backupDir, { recursive: true });
+    agentDir = join(tmpdir(), `pi-sync-read-${randomBytes(4).toString("hex")}`);
+    await mkdir(agentDir, { recursive: true });
   });
 
   afterEach(async () => {
-    await rm(backupDir, { recursive: true, force: true });
+    await rm(agentDir, { recursive: true, force: true });
   });
 
-  it("should create a backup copy", async () => {
-    const sourceDir = join(tmpdir(), `pi-sync-backup-src-${randomBytes(4).toString("hex")}`);
-    await mkdir(sourceDir, { recursive: true });
-    const sourcePath = join(sourceDir, "test.txt");
-    await writeFile(sourcePath, "backup me");
+  it("should read a file and compute hash", async () => {
+    await writeFile(join(agentDir, "test.txt"), "hello");
 
-    const backupPath = await backupFile(sourcePath, backupDir);
-    expect(existsSync(backupPath)).toBe(true);
+    const result = await readAgentFile(agentDir, "test.txt");
+    expect(result).not.toBeNull();
+    expect(result!.sha256).toBeDefined();
+    expect(result!.sha256.length).toBe(64); // SHA-256 hex string
+  });
 
-    const content = await readFile(backupPath, "utf-8");
-    expect(content).toBe("backup me");
-
-    await rm(sourceDir, { recursive: true, force: true });
+  it("should return null for missing file", async () => {
+    const result = await readAgentFile(agentDir, "nonexistent.txt");
+    expect(result).toBeNull();
   });
 });
