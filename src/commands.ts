@@ -21,6 +21,7 @@ import {
   hasUncommittedChanges,
   isDiverged,
   gitExec,
+  isGitFailure,
 } from "./git.ts";
 import { loadPiSyncConfig } from "./config.ts";
 import type { PiSyncConfig } from "./config.ts";
@@ -430,22 +431,42 @@ export class PiSyncCommands {
         const { mkdir } = await import("node:fs/promises");
         await mkdir(join(defaultPath, ".."), { recursive: true });
 
-        try {
-          const { exec: execCb } = await import("node:child_process");
-          const { promisify } = await import("node:util");
-          const execAsync = promisify(execCb);
-          await execAsync(`git clone "${gitUrl}" "${defaultPath}"`, {
-            timeout: 60000,
-            env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-          });
-        } catch (err: unknown) {
+        // Preflight：在真正 clone 之前验证可连通性与认证。失败时给出可操作的提示，
+        // 而不是留下半成品目录让用户去猜原因。
+        const preflight = await gitExec(
+          process.cwd(),
+          ["ls-remote", "--", gitUrl],
+          { timeout: 30000 },
+        );
+        if (isGitFailure(preflight.stdout, preflight.stderr)) {
+          return {
+            message: `Clone failed: cannot reach ${gitUrl}\n${preflight.stderr.trim() || preflight.stdout.trim()}\n\n` +
+              "Verify the URL, your network, and (for SSH URLs) that your key can authenticate.\n" +
+              "Tip: run `ssh -T git@github.com` in a terminal to confirm access.",
+            needsReload: false,
+          };
+        }
+
+        // clone（gitExec 已注入 accept-new，避免首次连接主机时 ys 提示在非交互环境下挂住）
+        const cloneResult = await gitExec(
+          join(defaultPath, ".."),
+          ["clone", "--", gitUrl, defaultPath],
+          { timeout: 60000 },
+        );
+        if (
+          isGitFailure(cloneResult.stdout, cloneResult.stderr) ||
+          !existsSync(join(defaultPath, ".git"))
+        ) {
           if (existsSync(defaultPath)) {
             const { rm } = await import("node:fs/promises");
             await rm(defaultPath, { recursive: true, force: true });
           }
           return {
-            message: `Clone failed: ${err instanceof Error ? err.message : "Unknown error"}\n` +
-              "Check that the URL is correct and your SSH key is configured.",
+            message: `Clone failed:\n${cloneResult.stderr.trim() || cloneResult.stdout.trim() || "Unknown error"}\n\n` +
+              "Common fixes:\n" +
+              "  - Confirm the URL is correct and the repo exists and is accessible to you.\n" +
+              "  - For SSH: ensure your key is reachable (try `ssh -T git@github.com` in a terminal).\n" +
+              "  - For HTTPS: avoid URLs that require an interactive password prompt, or configure a credential helper.",
             needsReload: false,
           };
         }

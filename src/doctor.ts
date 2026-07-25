@@ -95,21 +95,44 @@ async function checkSshAvailable(repoPath: string): Promise<DoctorCheck> {
   try {
     const result = await gitExec(repoPath, ["remote", "get-url", "origin"]);
     const url = result.stdout.trim();
-    if (url.startsWith("git@") || url.startsWith("ssh://")) {
-      // Try SSH connection
-      const hostMatch = url.match(/(?:git@|ssh:\/\/git@)([^:/]+)/);
-      if (hostMatch) {
-        return {
-          name: "SSH",
-          status: "ok",
-          message: `SSH remote configured: ${hostMatch[1]}`,
-        };
-      }
+    if (!url) {
+      return {
+        name: "SSH",
+        status: "warning",
+        message: "No 'origin' remote configured",
+      };
+    }
+    if (!/^git@|^ssh:\/\//.test(url)) {
+      return {
+        name: "SSH",
+        status: "ok",
+        message: "HTTPS remote (SSH check skipped)",
+      };
+    }
+
+    // Actually probe the remote end-to-end (auth + host key + network).
+    // Uses the same accept-new SSH options as clone, so first contact won't hang.
+    const probe = await gitExec(
+      repoPath,
+      ["ls-remote", "origin"],
+      { timeout: 20000 },
+    );
+    const hostMatch = url.match(/(?:git@|ssh:\/\/git@)([^:/]+)/);
+    const host = hostMatch?.[1] ?? "remote";
+
+    const failPattern = /fatal:|error:|Permission denied|Could not read from remote|Host key verification failed/i;
+    if (failPattern.test(`${probe.stderr}\n${probe.stdout}`)) {
+      return {
+        name: "SSH",
+        status: "error",
+        message: `Cannot reach ${host} via SSH: ${probe.stderr.trim() || probe.stdout.trim()}. ` +
+          "Tip: run `ssh -T git@github.com` in a terminal to confirm access.",
+      };
     }
     return {
       name: "SSH",
       status: "ok",
-      message: "HTTPS remote (SSH check skipped)",
+      message: `Authenticated to ${host} (${url})`,
     };
   } catch {
     return {

@@ -24,6 +24,38 @@ export interface GitDiff {
   oldPath?: string;
 }
 
+const FAIL_PATTERN = /fatal:|error:|Permission denied|Could not read from remote|timed out|exceeded timeout|ETIMEDOUT|Connection (?:timed out|refused|reset)/i;
+
+/**
+ * 构建所有 git 子进程共用的环境变量。
+ *
+ * - GIT_TERMINAL_PROMPT=0：禁止 git 自己的交互式凭据提示（Pi 没有可供输入的tty）。
+ * - GIT_SSH_COMMAND 追加 StrictHostKeyChecking=accept-new：首次连接新主机时自动接受
+ *   并写入 known_hosts，而不是卡在（在非交互环境下无法回答的）
+ *   "Are you sure you want to continue connecting (yes/no)?" 提示上。
+ *   这是 "终端里能 clone、在 Pi 里第一次 init 就失败" 最常见的根因。
+ *   若用户已自定义 GIT_SSH_COMMAND，则追加选项而非覆盖。
+ */
+export function buildGitEnv(): Record<string, string | undefined> {
+  const existing = process.env.GIT_SSH_COMMAND;
+  const sshCmd = existing
+    ? `${existing} -o StrictHostKeyChecking=accept-new`
+    : "ssh -o StrictHostKeyChecking=accept-new";
+  return {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_SSH_COMMAND: sshCmd,
+  };
+}
+
+/** 判断 git 子进程的输出是否表示真正的失败 */
+export function isGitFailure(
+  stdout: string,
+  stderr: string,
+): boolean {
+  return FAIL_PATTERN.test(`${stderr}\n${stdout}`);
+}
+
 /**
  * 在指定仓库路径执行 git 命令
  */
@@ -37,7 +69,7 @@ export async function gitExec(
     const result = await execAsync(command, {
       cwd: repoPath,
       timeout: options?.timeout ?? 30000,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      env: buildGitEnv(),
     });
     return { stdout: result.stdout.trimEnd(), stderr: result.stderr.trimEnd() };
   } catch (err: unknown) {
@@ -268,7 +300,7 @@ export async function canFastForward(
     const execAsync = promisify(execCb);
     await execAsync(
       `git merge-base --is-ancestor "${local}" "${remote}"`,
-      { cwd: repoPath, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } },
+      { cwd: repoPath, env: buildGitEnv() },
     );
     // exit code 0 means local is ancestor of remote (can fast-forward)
     return true;
