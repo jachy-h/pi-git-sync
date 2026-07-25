@@ -1,50 +1,52 @@
 /**
- * /pisync 命令路由
+ * /pisync 命令路由（schema v2）
  *
- * 所有同步操作的主入口
+ * 所有同步操作的主入口。
+ *
+ * 核心流程变化（v1 → v2）：
+ * - 配置仓库不再作为 Pi Package 安装
+ * - settings.json 整文件共享，不做 managed-key merge
+ * - 基于同步基线的三方比较
+ * - capture → commit → fetch → rebase → push → apply 完整 push 链
+ * - 冲突处理与 push --continue
  */
 import { join } from "node:path";
 import { existsSync } from "node:fs";
-import { writeFile, readFile } from "node:fs/promises";
+import { writeFile, readFile, mkdir } from "node:fs/promises";
 import { hostname } from "node:os";
 import {
-  gitStatus,
-  gitFetch,
-  gitPull,
-  gitPush,
-  gitRenameBranch,
-  gitDiff,
-  gitDiffFiles,
-  gitDiffRange,
-  gitCommit,
-  getHeadCommit,
-  hasUncommittedChanges,
-  isDiverged,
-  gitExec,
-  isGitFailure,
+  gitStatus, gitFetch, gitPull, gitPush, gitRenameBranch,
+  gitDiff, gitDiffRange, gitDiffStaged,
+  gitRebase, gitRebaseContinue, gitRebaseAbort,
+  gitCommit, getHeadCommit, hasUncommittedChanges, isDiverged,
+  hasUnmergedPaths, isWorktreeClean, gitExec, isGitFailure,
+  gitRemoteRefExists,
 } from "./git.ts";
 import { loadPiSyncConfig } from "./config.ts";
 import type { PiSyncConfig } from "./config.ts";
-import { mergeSettings } from "./settings.ts";
-import { materializeFiles, diffFiles } from "./materialize.ts";
-import { createBackup, listBackups, restoreBackup } from "./backup.ts";
+import { planMaterialize, executeMaterialize } from "./materialize.ts";
+import type { MaterializePlan, MaterializeResult } from "./materialize.ts";
+import { createBackup, listBackups, restoreBackup, getLatestBackup } from "./backup.ts";
 import { SyncLock } from "./lock.ts";
-import { isDenied, scanSecrets } from "./security.ts";
+import { findDeniedFiles, scanSecrets, scanFilesForSecrets } from "./security.ts";
 import { loadState, saveState, updateState } from "./state.ts";
-import { captureFiles, extractManagedSettings } from "./capture.ts";
+import type { SyncState } from "./state.ts";
+import { captureChanges, verifyCapture } from "./capture.ts";
+import { compareFiles, hasLocalChanges, sha256File, sha256 } from "./inventory.ts";
+import type { FileComparison } from "./inventory.ts";
+import { validateFiles } from "./validate.ts";
 import { runDoctorChecks } from "./doctor.ts";
 import { reconcilePackages, getPackageDiff } from "./packages.ts";
+import { readAgentFile } from "./materialize.ts";
 import {
-  formatGitStatus,
-  formatSettingsChanges,
-  formatSyncStatus,
-  formatDoctorResult,
-  formatSecretsFindings,
-  formatBackupList,
-  formatPackageDiff,
+  formatGitStatus, formatSyncStatusV2, formatComparisonDiff,
+  formatDoctorResult, formatSecretsFindings, formatBackupList,
+  formatPackageDiff, formatValidationErrors,
+  formatCaptureResult,
 } from "./ui.ts";
 
-/** 获取 Pi agent 目录 */
+// ========== 路径工具 ==========
+
 export function getAgentDir(): string {
   const envDir = process.env.PI_CODING_AGENT_DIR;
   if (envDir) return envDir;
@@ -53,7 +55,6 @@ export function getAgentDir(): string {
   return join(home, ".pi", "agent");
 }
 
-/** 安全获取仓库路径（不抛异常） */
 export async function getRepoPathSafe(agentDir: string): Promise<string | null> {
   try {
     return await getRepoPath();
@@ -62,9 +63,8 @@ export async function getRepoPathSafe(agentDir: string): Promise<string | null> 
   }
 }
 
-/** 从 state 或 config 获取仓库路径 */
-export async function getRepoPath(configOverrride?: string): Promise<string> {
-  if (configOverrride) return configOverrride;
+export async function getRepoPath(configOverride?: string): Promise<string> {
+  if (configOverride) return configOverride;
 
   const agentDir = getAgentDir();
   const state = await loadState(agentDir);
@@ -72,9 +72,11 @@ export async function getRepoPath(configOverrride?: string): Promise<string> {
     return state.repoPath;
   }
   throw new Error(
-    "No config repo found. Use /pisync apply <repo-path> or set repoPath in state.",
+    "No config repo found. Use /pisync init <git-url> to set up.",
   );
 }
+
+// ========== 命令类 ==========
 
 export class PiSyncCommands {
   private agentDir: string;
@@ -85,313 +87,426 @@ export class PiSyncCommands {
     this.lock = new SyncLock(join(this.agentDir, ".pi-sync"));
   }
 
-  // ============ status ============
+  // ========== status ==========
 
   async status(repoPath?: string): Promise<string> {
     const rp = repoPath ?? (await getRepoPathSafe(this.agentDir));
-    if (!rp) return "No config repo configured. Use /pisync apply <repo-path> first.";
+    if (!rp) return "No config repo configured. Use /pisync init <git-url> first.";
 
     const config = await loadPiSyncConfig(rp);
     const status = await gitStatus(rp);
     const state = await loadState(this.agentDir);
 
-    // Check settings changes
-    const localSettings = await this.loadLocalSettings();
-    const settingsResult = await mergeSettings(
-      localSettings,
-      rp,
-      config.settings,
-      hostname(),
-    );
+    // 三方比较
+    const inventory = await compareFiles(this.agentDir, rp, config, state);
 
-    // Check file changes
-    const fileChanges = await diffFiles(rp, this.agentDir, config.files);
-
-    // Check package changes
+    // Package diff
     let pkgDiff = null;
     try {
       pkgDiff = await getPackageDiff(rp, this.agentDir, config);
-    } catch {
-      // best-effort
-    }
+    } catch { /* best-effort */ }
 
-    // 已同步内容目录（extensions/ skills/ prompts/ themes …）及其条目数量
-    const dirs = await gatherSyncedDirs(rp);
-
-    return formatSyncStatus({
-      status,
+    return formatSyncStatusV2({
+      repoPath: rp,
+      gitStatus: status,
       config,
-      settingsChanges: settingsResult.changed,
-      fileChanges,
-      managedSettings: state.managedSettings,
-      lastAppliedCommit: state.lastAppliedCommit,
-      lastAppliedAt: state.lastAppliedAt,
-      dirs,
+      inventory,
+      state,
       pkgDiff: pkgDiff ?? undefined,
     });
   }
 
-  // ============ diff ============
+  // ========== diff ==========
 
   async diff(repoPath?: string): Promise<string> {
     const rp = repoPath ?? (await getRepoPathSafe(this.agentDir));
-    if (!rp) return "No config repo configured. Use /pisync apply <repo-path> first.";
+    if (!rp) return "No config repo configured. Use /pisync init <git-url> first.";
 
     const config = await loadPiSyncConfig(rp);
+    const status = await gitStatus(rp);
+    const state = await loadState(this.agentDir);
+
+    // 三方比较
+    const inventory = await compareFiles(this.agentDir, rp, config, state);
+
     const lines: string[] = [];
 
-    // Git diff
-    const status = await gitStatus(rp);
-    lines.push("=== Git Changes ===");
-    if (status.hasUncommittedChanges) {
-      lines.push(await gitDiff(rp));
-    } else if (status.behind > 0) {
-      try {
-        await gitFetch(rp);
-      } catch {
-        // fetch may fail if no network
-      }
-      const currentCommit = await getHeadCommit(rp);
-      try {
-        const rangeDiff = await gitDiffRange(rp, currentCommit, `origin/${status.branch}`);
-        if (rangeDiff) {
-          lines.push(rangeDiff);
-        } else {
-          lines.push("(no content diff available - run /pisync pull to update)");
-        }
-      } catch {
-        lines.push(formatGitStatus(status));
-      }
-    } else {
-      lines.push(formatGitStatus(status));
-    }
+    // Git 状态
+    lines.push("=== Git Status ===");
+    lines.push(formatGitStatus(status));
     lines.push("");
 
-    // Settings diff
-    const localSettings = await this.loadLocalSettings();
-    const settingsResult = await mergeSettings(
-      localSettings,
-      rp,
-      config.settings,
-      hostname(),
-    );
-    lines.push("=== Settings Changes ===");
-    lines.push(formatSettingsChanges(settingsResult.changed));
+    // Agent ↔ Repo 差异（基于基线）
+    lines.push("=== File Comparison ===");
+    lines.push(formatComparisonDiff(inventory.comparisons));
     lines.push("");
 
-    // File diff
-    const fileChanges = await diffFiles(rp, this.agentDir, config.files);
-    lines.push("=== File Changes ===");
-    if (Object.keys(fileChanges).length === 0) {
-      lines.push("No file changes pending.");
-    } else {
-      for (const [file, change] of Object.entries(fileChanges)) {
-        const icon = {
-          will_create: "[create]",
-          will_update: "[update]",
-          unchanged: "[ok]",
-          source_missing: "[MISSING]",
-        }[change.action] ?? "[?]";
-        lines.push(`  ${icon} ${file}${change.diff ? ` — ${change.diff}` : ""}`);
+    // Remote diff（如果有 ahead/behind）
+    if (status.remoteExists) {
+      if (status.behind > 0) {
+        try {
+          await gitFetch(rp);
+          const rangeDiff = await gitDiffRange(
+            rp,
+            status.commit,
+            `origin/${status.branch}`,
+          );
+          if (rangeDiff) {
+            lines.push("=== Remote Changes (to be pulled) ===");
+            lines.push(rangeDiff);
+            lines.push("");
+          }
+        } catch { /* offline */ }
       }
-    }
-    lines.push("");
-
-    // Package diff
-    try {
-      const pkgDiff = await getPackageDiff(rp, this.agentDir, config);
-      lines.push("=== Package Changes ===");
-      lines.push(formatPackageDiff(pkgDiff));
-    } catch {
-      // best-effort
     }
 
     return lines.join("\n");
   }
 
-  // ============ pull ============
+  // ========== capture ==========
 
-  async pull(repoPath?: string): Promise<string> {
+  async capture(repoPath?: string): Promise<string> {
     const rp = repoPath ?? (await getRepoPath());
     const config = await loadPiSyncConfig(rp);
+    const state = await loadState(this.agentDir);
 
-    // 获取锁
-    const acquired = await this.lock.acquire("pull", 5000);
+    const acquired = await this.lock.acquire("capture", 5000);
     if (!acquired) {
       const existing = await this.lock.readLock();
       return `Another sync operation is in progress: ${existing?.operation} (PID ${existing?.pid}, started ${existing?.startedAt})`;
     }
 
     try {
-      const status = await gitStatus(rp);
+      const result = await captureChanges(this.agentDir, rp, config, state);
 
-      // 检查未提交变更
-      if (status.hasUncommittedChanges) {
-        return "Repository has uncommitted changes. Please commit or stash them first.";
+      if (result.hasConflicts) {
+        const conflictList = result.conflicts.map((c) => `  ${c.relativePath}`).join("\n");
+        return `Capture blocked: bilateral modifications detected.\nResolve conflicts manually or run /pisync status for details.\n\nConflicts:\n${conflictList}`;
       }
 
-      // Fetch
-      try {
-        await gitFetch(rp);
-      } catch (err) {
-        return `git fetch failed: ${err instanceof Error ? err.message : "Unknown error"}`;
-      }
-
-      // 检查 divergence
-      const diverged = await isDiverged(rp, status.branch, `origin/${status.branch}`);
-      if (diverged) {
-        return "Local and remote branches have diverged. Please resolve manually with git pull --rebase in the repo.";
-      }
-
-      // Pull (fast-forward only)
-      const { pulled } = await gitPull(rp, status.branch);
-      if (!pulled) {
-        return "Already up to date.";
-      }
-
-      const newCommit = await getHeadCommit(rp);
-
-      // 应用配置
-      const applyResult = await this.applyCurrent(rp, config, `pull-${newCommit.substring(0, 7)}`);
-
-      // 更新状态
-      await updateState(this.agentDir, {
-        lastAppliedCommit: newCommit,
-        lastAppliedAt: new Date().toISOString(),
-        managedSettings: Object.keys(
-          (await mergeSettings(
-            await this.loadLocalSettings(),
-            rp,
-            config.settings,
-            hostname(),
-          )).merged,
-        ),
-      });
-
-      return `Pulled and applied successfully.\nNew commit: ${newCommit.substring(0, 7)}\n${applyResult}`;
+      return formatCaptureResult(result);
     } finally {
       await this.lock.release();
     }
   }
 
-  // ============ push ============
+  // ========== apply ==========
 
-  async push(repoPath?: string, message?: string): Promise<string> {
+  async apply(repoPath?: string): Promise<{ message: string; reload: boolean }> {
     const rp = repoPath ?? (await getRepoPath());
     const config = await loadPiSyncConfig(rp);
+    const state = await loadState(this.agentDir);
 
-    // 获取锁
-    const acquired = await this.lock.acquire("push", 5000);
+    const acquired = await this.lock.acquire("apply", 5000);
     if (!acquired) {
-      return "Another sync operation is in progress.";
+      return { message: "Another sync operation is in progress.", reload: false };
     }
 
     try {
-      // 检查未提交变更
-      const hasChanges = await hasUncommittedChanges(rp);
-      if (!hasChanges) {
-        return "No changes to push.";
-      }
-
-      // 获取变更文件列表并进行 denylist 检查
-      const status = await gitStatus(rp);
-      const deniedFiles: string[] = [];
-      for (const file of status.changedFiles) {
-        if (isDenied(file, config.security.deny)) {
-          deniedFiles.push(file);
-        }
-      }
-
-      if (deniedFiles.length > 0) {
-        return `Push blocked: The following files are in the denylist:\n${deniedFiles.map((f) => `  - ${f}`).join("\n")}\n\nRemove these files from staging or update pi-sync.json security.deny.`;
-      }
-
-      // 秘密扫描
-      if (config.security.scanSecretsBeforePush) {
-        const diffContent = await gitDiff(rp);
-        if (diffContent) {
-          const findings = scanSecrets(diffContent, "diff");
-          if (findings.length > 0) {
-            return `Push blocked: Potential secrets detected:\n${formatSecretsFindings(findings)}`;
-          }
-        }
-      }
-
-      // Commit
-      const commitMsg = message ?? "pi-sync: update configuration";
-      await gitCommit(rp, commitMsg);
-
-      // Pull rebase before push
-      try {
-        await gitFetch(rp);
-        const diverged = await isDiverged(rp, status.branch, `origin/${status.branch}`);
-        if (diverged) {
-          return "Remote has new commits. Would recommend using /pisync pull first. Or run git pull --rebase manually in the repo.";
-        }
-      } catch {
-        // Proceed with push attempt
-      }
-
-      // Push
-      await gitPush(rp, config.branch ?? status.branch);
-
-      // 更新状态
-      await updateState(this.agentDir, {
-        lastPushAt: new Date().toISOString(),
-      });
-
-      const newCommit = await getHeadCommit(rp);
-      return `Pushed successfully. Commit: ${newCommit.substring(0, 7)}`;
-    } catch (err) {
-      return `Push failed: ${err instanceof Error ? err.message : "Unknown error"}`;
+      return await this.applyCurrent(rp, config, state, "apply");
     } finally {
       await this.lock.release();
     }
   }
 
-  // ============ init (统一入口: 首次设置 clone/scaffold，后续调用直接 apply) ============
+  // ========== pull ==========
+
+  async pull(repoPath?: string): Promise<{ message: string; reload: boolean }> {
+    const rp = repoPath ?? (await getRepoPath());
+    const config = await loadPiSyncConfig(rp);
+    const state = await loadState(this.agentDir);
+
+    const acquired = await this.lock.acquire("pull", 5000);
+    if (!acquired) {
+      return { message: "Another sync operation is in progress.", reload: false };
+    }
+
+    try {
+      // 1. 检查 repo 状态
+      const status = await gitStatus(rp);
+
+      if (status.isRebasing || status.isMerging) {
+        return { message: "Repository is in rebase/merge state. Resolve conflicts first.", reload: false };
+      }
+
+      if (status.hasUncommittedChanges) {
+        return { message: "Repository has uncommitted changes. Commit or stash them first.", reload: false };
+      }
+
+      // 2. 检查 agent 是否有未捕获修改
+      const inventory = await compareFiles(this.agentDir, rp, config, state);
+      if (hasLocalChanges(inventory.comparisons)) {
+        const localChanges = inventory.comparisons
+          .filter((c) =>
+            c.changeType === "local_only" ||
+            c.changeType === "local_created" ||
+            c.changeType === "local_deleted"
+          )
+          .map((c) => `  ${c.relativePath}`)
+          .join("\n");
+        return {
+          message: `Local changes detected that have not been captured:\n${localChanges}\n\nRun /pisync push or /pisync capture first, or discard local changes.`,
+          reload: false,
+        };
+      }
+
+      // 3. Fetch
+      try {
+        await gitFetch(rp);
+      } catch (err) {
+        return { message: `git fetch failed: ${err instanceof Error ? err.message : "Unknown"}`, reload: false };
+      }
+
+      // 4. 检查 divergence
+      const diverged = await isDiverged(rp, status.branch, `origin/${status.branch}`);
+      if (diverged) {
+        return { message: "Local and remote branches have diverged. Resolve manually with git pull --rebase in the repo.", reload: false };
+      }
+
+      // 5. Pull (fast-forward only)
+      const { pulled } = await gitPull(rp, status.branch);
+      if (!pulled) {
+        return { message: "Already up to date.", reload: false };
+      }
+
+      // 6. Apply
+      const newState = await loadState(this.agentDir);
+      return await this.applyCurrent(rp, config, newState, "pull");
+    } finally {
+      await this.lock.release();
+    }
+  }
+
+  // ========== push ==========
+
+  async push(
+    repoPath?: string,
+    message?: string,
+    subCommand?: string,
+  ): Promise<{ message: string; reload: boolean }> {
+    // push --continue
+    if (subCommand === "--continue") {
+      return this.pushContinue(repoPath);
+    }
+
+    const rp = repoPath ?? (await getRepoPath());
+    const config = await loadPiSyncConfig(rp);
+    const state = await loadState(this.agentDir);
+
+    const acquired = await this.lock.acquire("push", 5000);
+    if (!acquired) {
+      return { message: "Another sync operation is in progress.", reload: false };
+    }
+
+    try {
+      // 1. 检查 repo 状态
+      const status = await gitStatus(rp);
+
+      if (status.isRebasing || status.isMerging || status.hasConflicts) {
+        return {
+          message: "Repository is in conflict/resolution state. Use /pisync push --continue after resolving, or git rebase --abort to cancel.",
+          reload: false,
+        };
+      }
+
+      // 2. Capture agent → repo
+      const captureResult = await captureChanges(this.agentDir, rp, config, state);
+      if (captureResult.hasConflicts) {
+        const conflictList = captureResult.conflicts.map((c) => `  ${c.relativePath}`).join("\n");
+        let msg = `Push blocked: bilateral modifications detected.\n\nConflicts:\n${conflictList}\n`;
+        if (captureResult.captured.length > 0) {
+          msg += `\nPartially captured: ${captureResult.captured.join(", ")}`;
+        }
+        return { message: msg, reload: false };
+      }
+
+      if (!(await hasUncommittedChanges(rp))) {
+        return { message: "No changes to push.", reload: false };
+      }
+
+      // 3. 校验白名单内容
+      const changedFiles = status.changedFiles;
+      if (changedFiles.length > 0) {
+        const validation = await validateFiles(rp, config, changedFiles);
+        if (validation.blocked) {
+          return {
+            message: `Push blocked: validation errors.\n${formatValidationErrors(validation.errors)}`,
+            reload: false,
+          };
+        }
+      }
+
+      // 4. Secret scan（完整文件 + staged diff）
+      if (config.security.scanSecretsBeforePush) {
+        const secretFindings = await this.scanForSecrets(rp, config);
+        if (secretFindings.length > 0) {
+          return {
+            message: `Push blocked: potential secrets detected.\n${formatSecretsFindings(secretFindings)}`,
+            reload: false,
+          };
+        }
+      }
+
+      // 5. 展示 diff + 确认（此处在 TUI 层处理确认，这里只返回 diff）
+      // 由于 Pi 的 Extension API 不直接支持"等待确认再继续"，
+      // 在实际 TUI 中由 index.ts 的 handlePush 做两步交互。
+
+      // 6. Commit
+      const commitMsg = message ?? "pi-sync: update configuration";
+      await gitCommit(rp, commitMsg);
+
+      // 7. Fetch + Rebase
+      try {
+        await gitFetch(rp);
+      } catch {
+        // 离线时可继续（后续 push 会失败但给出明确信息）
+      }
+
+      try {
+        const remoteRefExists = await gitRemoteRefExists(rp, status.branch).catch(() => false);
+        if (remoteRefExists) {
+          const rebaseResult = await gitRebase(rp, status.branch);
+
+          if (rebaseResult.conflict) {
+            // Rebase 冲突 → 停止，记录 pending operation
+            await updateState(this.agentDir, { pendingOperation: "push-rebase-conflict" });
+            return {
+              message: "Rebase conflict detected. The repo contains standard Git conflict markers.\n\n" +
+                "To resolve:\n" +
+                "  1. Edit files in the repo to fix conflicts\n" +
+                "  2. Run: git add <resolved-files>\n" +
+                "  3. Run: git rebase --continue\n" +
+                "  4. Run: /pisync push --continue\n\n" +
+                "Or to abort: git rebase --abort (then /pisync doctor to clean up pending state)",
+              reload: false,
+            };
+          }
+        }
+      } catch (err) {
+        return {
+          message: `Rebase failed: ${err instanceof Error ? err.message : "Unknown"}`,
+          reload: false,
+        };
+      }
+
+      // 8. Push
+      try {
+        await gitPush(rp, status.branch);
+      } catch (err) {
+        return {
+          message: `Push failed: ${err instanceof Error ? err.message : "Unknown"}\nLocal commits are preserved. Fix the remote issue and try again.`,
+          reload: false,
+        };
+      }
+
+      // 9. Apply final HEAD back to agent
+      const newState = await loadState(this.agentDir);
+      const applyResult = await this.applyCurrent(rp, config, newState, "push");
+
+      return {
+        message: `Pushed successfully.\n${applyResult.message}`,
+        reload: applyResult.reload,
+      };
+    } finally {
+      await this.lock.release();
+    }
+  }
 
   /**
-   * 统一 init 命令。
-   * - 如果已经初始化过（state 中有 repoPath 且 repo 存在），直接 apply
-   * - 如果没有初始化，要求提供 gitUrl：
-   *   - 空仓库：scaffold 配置结构
-   *   - 已有 pi-sync.json 的标准同步仓库：拉取并 apply
-   *   - 有内容但不是标准同步仓库：报错提示
+   * push --continue：解决冲突后继续推送
    */
+  private async pushContinue(
+    repoPath?: string,
+  ): Promise<{ message: string; reload: boolean }> {
+    const rp = repoPath ?? (await getRepoPath());
+    const config = await loadPiSyncConfig(rp);
+    const state = await loadState(this.agentDir);
+
+    if (state.pendingOperation !== "push-rebase-conflict") {
+      return { message: "No pending push operation to continue.", reload: false };
+    }
+
+    const acquired = await this.lock.acquire("push-continue", 5000);
+    if (!acquired) {
+      return { message: "Another sync operation is in progress.", reload: false };
+    }
+
+    try {
+      // 1. 确认无 unmerged paths
+      if (await hasUnmergedPaths(rp)) {
+        return {
+          message: "There are still unmerged paths. Resolve all conflicts and run git add + git rebase --continue first.",
+          reload: false,
+        };
+      }
+
+      // 2. 确认工作树干净
+      if (!(await isWorktreeClean(rp))) {
+        return { message: "Worktree is not clean. Commit or stash changes first.", reload: false };
+      }
+
+      // 3. 校验最终提交
+      const status = await gitStatus(rp);
+      const diffFiles = await gitDiffRange(rp, `origin/${status.branch}`, "HEAD").catch(() => "");
+      const allRepoSyncFiles = await this.getRepoSyncFiles(rp, config);
+
+      const validation = await validateFiles(rp, config, allRepoSyncFiles);
+      if (validation.blocked) {
+        return {
+          message: `Validation errors after conflict resolution:\n${formatValidationErrors(validation.errors)}`,
+          reload: false,
+        };
+      }
+
+      // 4. Secret scan
+      if (config.security.scanSecretsBeforePush) {
+        const secretFindings = await this.scanForSecrets(rp, config);
+        if (secretFindings.length > 0) {
+          return {
+            message: `Push blocked: potential secrets detected.\n${formatSecretsFindings(secretFindings)}`,
+            reload: false,
+          };
+        }
+      }
+
+      // 5. Push
+      try {
+        await gitPush(rp, status.branch);
+      } catch (err) {
+        return {
+          message: `Push failed: ${err instanceof Error ? err.message : "Unknown"}`,
+          reload: false,
+        };
+      }
+
+      // 6. Apply + 更新状态
+      const newState = { ...state, pendingOperation: null };
+      await saveState(this.agentDir, newState);
+
+      const applyResult = await this.applyCurrent(rp, config, newState, "push");
+
+      return {
+        message: `Push continued successfully.\n${applyResult.message}`,
+        reload: applyResult.reload,
+      };
+    } finally {
+      await this.lock.release();
+    }
+  }
+
+  // ========== init (统一入口) ==========
+
   async init(gitUrl?: string): Promise<{
     message: string;
     needsReload: boolean;
-    /** 是否整体成功（单步最佳努力型失败，如 pi install 失败，仍视为成功） */
     ok: boolean;
-    /** 用于调用方决定提示级别；不再靠字符串嗅探猜测 */
     level: "info" | "warning" | "error";
   }> {
     const defaultPath = join(this.agentDir, "..", "config-repo");
 
     // 已初始化：直接 apply
     if (await this.isAlreadyInitialized(defaultPath)) {
-      const acquired = await this.lock.acquire("apply", 5000);
-      if (!acquired) {
-        return { message: "Another sync operation is in progress.", needsReload: false, ok: false, level: "warning" };
-      }
-      try {
-        // Fetch latest first
-        try {
-          await gitFetch(defaultPath);
-          const status = await gitStatus(defaultPath);
-          if (status.behind > 0) {
-            await gitPull(defaultPath, status.branch);
-          }
-        } catch {
-          // Offline or no remote — proceed with local apply
-        }
-        const config = await loadPiSyncConfig(defaultPath);
-        const applyResult = await this.applyCurrent(defaultPath, config, "init");
-        return { message: `Already initialized. Applied current config.\n${applyResult}`, needsReload: true, ok: true, level: "info" };
-      } finally {
-        await this.lock.release();
-      }
+      return this.initAlreadyInitialized(defaultPath);
     }
 
     // 未初始化 — 需要 gitUrl
@@ -405,20 +520,64 @@ export class PiSyncCommands {
       };
     }
 
-    // Validate URL format
+    // 校验 URL 格式
     if (!isValidGitUrl(gitUrl)) {
       return {
         message: `Invalid Git URL: ${gitUrl}\n` +
           "Expected formats:\n" +
           "  git@github.com:user/repo.git\n" +
-          "  https://github.com/user/repo.git\n" +
-          "  ssh://git@github.com/user/repo.git",
+          "  https://github.com/user/repo.git",
         needsReload: false,
         ok: false,
         level: "error",
       };
     }
 
+    return this.initFresh(gitUrl, defaultPath);
+  }
+
+  private async initAlreadyInitialized(defaultPath: string): Promise<{
+    message: string;
+    needsReload: boolean;
+    ok: boolean;
+    level: "info" | "warning" | "error";
+  }> {
+    const acquired = await this.lock.acquire("apply", 5000);
+    if (!acquired) {
+      return { message: "Another sync operation is in progress.", needsReload: false, ok: false, level: "warning" };
+    }
+
+    try {
+      // Fetch latest
+      try {
+        await gitFetch(defaultPath);
+        const status = await gitStatus(defaultPath);
+        if (status.behind > 0) {
+          await gitPull(defaultPath, status.branch);
+        }
+      } catch { /* offline */ }
+
+      const config = await loadPiSyncConfig(defaultPath);
+      const state = await loadState(this.agentDir);
+      const applyResult = await this.applyCurrent(defaultPath, config, state, "init");
+
+      return {
+        message: `Already initialized. Applied current config.\n${applyResult.message}`,
+        needsReload: true,
+        ok: true,
+        level: "info",
+      };
+    } finally {
+      await this.lock.release();
+    }
+  }
+
+  private async initFresh(gitUrl: string, defaultPath: string): Promise<{
+    message: string;
+    needsReload: boolean;
+    ok: boolean;
+    level: "info" | "warning" | "error";
+  }> {
     const acquired = await this.lock.acquire("init", 5000);
     if (!acquired) {
       return { message: "Another sync operation is in progress.", needsReload: false, ok: false, level: "warning" };
@@ -426,33 +585,27 @@ export class PiSyncCommands {
 
     try {
       const lines: string[] = [];
-      let isNewClone = false;
 
       if (existsSync(defaultPath) && existsSync(join(defaultPath, ".git"))) {
-        // Repo already exists locally, verify it's the same remote
-        const result = await gitExec(defaultPath, ["remote", "get-url", "origin"]);
-        const existingUrl = result.stdout.trim();
+        // 仓库已存在，验证 origin
+        const existingResult = await gitExec(defaultPath, ["remote", "get-url", "origin"]);
+        const existingUrl = existingResult.stdout.trim();
 
         if (!urlsMatch(existingUrl, gitUrl)) {
           return {
             message: `A config repo already exists at ${defaultPath}\n` +
-              `Existing remote: ${existingUrl}\n` +
-              `Provided URL:   ${gitUrl}\n` +
+              `Existing remote: ${existingUrl}\nProvided URL:   ${gitUrl}\n` +
               "To switch, remove the existing repo first: rm -rf ~/.pi/config-repo",
-            needsReload: false,
-            ok: false,
-            level: "error",
+            needsReload: false, ok: false, level: "error",
           };
         }
         lines.push(`Config repo already exists at ${defaultPath}`);
       } else {
-        // Fresh clone
+        // Clone
         lines.push(`Cloning ${gitUrl}...`);
-        const { mkdir } = await import("node:fs/promises");
         await mkdir(join(defaultPath, ".."), { recursive: true });
 
-        // Preflight：在真正 clone 之前验证可连通性与认证。失败时给出可操作的提示，
-        // 而不是留下半成品目录让用户去猜原因。
+        // Preflight
         const preflight = await gitExec(
           process.cwd(),
           ["ls-remote", "--", gitUrl],
@@ -461,15 +614,11 @@ export class PiSyncCommands {
         if (isGitFailure(preflight.stdout, preflight.stderr)) {
           return {
             message: `Clone failed: cannot reach ${gitUrl}\n${preflight.stderr.trim() || preflight.stdout.trim()}\n\n` +
-              "Verify the URL, your network, and (for SSH URLs) that your key can authenticate.\n" +
-              "Tip: run `ssh -T git@github.com` in a terminal to confirm access.",
-            needsReload: false,
-            ok: false,
-            level: "error",
+              "Verify the URL, your network, and (for SSH URLs) that your key can authenticate.",
+            needsReload: false, ok: false, level: "error",
           };
         }
 
-        // clone（gitExec 已注入 accept-new，避免首次连接主机时 ys 提示在非交互环境下挂住）
         const cloneResult = await gitExec(
           join(defaultPath, ".."),
           ["clone", "--", gitUrl, defaultPath],
@@ -484,54 +633,38 @@ export class PiSyncCommands {
             await rm(defaultPath, { recursive: true, force: true });
           }
           return {
-            message: `Clone failed:\n${cloneResult.stderr.trim() || cloneResult.stdout.trim() || "Unknown error"}\n\n` +
-              "Common fixes:\n" +
-              "  - Confirm the URL is correct and the repo exists and is accessible to you.\n" +
-              "  - For SSH: ensure your key is reachable (try `ssh -T git@github.com` in a terminal).\n" +
-              "  - For HTTPS: avoid URLs that require an interactive password prompt, or configure a credential helper.",
-            needsReload: false,
-            ok: false,
-            level: "error",
+            message: `Clone failed:\n${cloneResult.stderr.trim() || cloneResult.stdout.trim()}`,
+            needsReload: false, ok: false, level: "error",
           };
         }
         lines.push("Clone complete.");
-        isNewClone = true;
       }
 
       // Fetch latest
       await gitFetch(defaultPath).catch(() => {});
 
-      // Detect repo state: empty / valid sync repo / invalid
+      // 检测仓库状态
       const repoState = await detectRepoState(defaultPath);
 
       if (repoState === "empty") {
-        // Empty repo — scaffold
-        lines.push("Empty repository detected — scaffolding config structure...");
-        await scaffoldConfigRepo(defaultPath);
-        await gitCommit(defaultPath, "pi-sync: initial config scaffold");
+        // Scaffold schema v2
+        lines.push("Empty repository — scaffolding config structure (schema v2)...");
+        await scaffoldConfigRepoV2(defaultPath);
+        await gitCommit(defaultPath, "pi-sync: initial config scaffold (v2)");
 
-        // A newly cloned empty repository has no reliable local branch name
-        // (it can be either main or master).  The scaffold declares main, so
-        // make that explicit and push it immediately.
         await gitRenameBranch(defaultPath, "main");
         try {
           await gitPush(defaultPath, "main");
           lines.push("Scaffold committed and pushed to origin/main.");
         } catch (err) {
-          // Keep the local scaffold usable: the user can resolve the remote
-          // issue and retry with /pisync push without re-running init.
           await updateState(this.agentDir, { repoPath: defaultPath });
           const detail = err instanceof Error ? err.message : "Unknown error";
           return {
             message: `${lines.join("\n")}\n\n` +
-              "The initial scaffold was committed locally but could not be pushed.\n" +
-              "The remote may have received another commit while initialization was running, or access was denied. " +
-              "Resolve the remote conflict/authentication issue, then run /pisync push.\n" +
+              "Scaffold committed locally but could not be pushed.\n" +
+              "Resolve the remote issue, then run /pisync push.\n" +
               `Details: ${detail}`,
-            needsReload: false,
-            // 本地脚手架已生成，只是没能推送到远端 —— 可恢复，不算硬失败。
-            ok: false,
-            level: "warning",
+            needsReload: false, ok: false, level: "warning",
           };
         }
         lines.push("");
@@ -539,54 +672,36 @@ export class PiSyncCommands {
         return {
           message: `The repository at ${gitUrl} has commits but is not a valid pi-sync config repo.\n` +
             "A pi-sync config repo must have a pi-sync.json at its root.\n" +
-            "Either:\n" +
-            "  1. Use an empty repository for auto-scaffolding, or\n" +
-            "  2. Ensure the repo contains a valid pi-sync.json file.",
-          needsReload: false,
-          ok: false,
-          level: "error",
+            "Either use an empty repository for auto-scaffolding, or ensure the repo contains a valid pi-sync.json file.",
+          needsReload: false, ok: false, level: "error",
         };
       } else {
-        // Valid sync repo — pull latest
+        // Valid sync repo
         lines.push("Valid sync repo detected — fetching latest...");
         const status = await gitStatus(defaultPath);
         const { pulled } = await gitPull(defaultPath, status.branch);
         lines.push(pulled ? "Updated to latest." : "Already up to date.");
       }
 
-      // Update state
+      // 更新 state（但不再 pi install）
       await updateState(this.agentDir, { repoPath: defaultPath });
-
-      // Install as Pi package
-      lines.push("Installing as Pi package...");
-      try {
-        const { execFile: execFileCb } = await import("node:child_process");
-        const { promisify } = await import("node:util");
-        const execFileAsync = promisify(execFileCb);
-        // Use an argv array (not a shell string) so paths containing spaces
-        // are passed to `pi` verbatim instead of being shell-split.
-        await execFileAsync("pi", ["install", defaultPath], {
-          timeout: 60000,
-          env: { ...process.env },
-        });
-        lines.push("Package installed.");
-      } catch (err: unknown) {
-        lines.push(
-          `pi install failed: ${err instanceof Error ? err.message : "Unknown"}`,
-        );
-        lines.push(`Run manually: pi install ${defaultPath}`);
-      }
 
       // Apply config
       const config = await loadPiSyncConfig(defaultPath);
-      const applyResult = await this.applyCurrent(defaultPath, config, "init");
-      lines.push(applyResult);
+      const state = await loadState(this.agentDir);
+      const applyResult = await this.applyCurrent(defaultPath, config, state, "init");
+      lines.push(applyResult.message);
 
       lines.push("");
       lines.push("Setup complete! Your config is now synced.");
       lines.push("Use /pisync for day-to-day sync operations.");
 
-      return { message: lines.join("\n"), needsReload: true, ok: true, level: "info" };
+      return {
+        message: lines.join("\n"),
+        needsReload: applyResult.reload,
+        ok: true,
+        level: "info",
+      };
     } catch (err) {
       return {
         message: `Init failed: ${err instanceof Error ? err.message : "Unknown error"}`,
@@ -599,9 +714,6 @@ export class PiSyncCommands {
     }
   }
 
-  /**
-   * 判断是否已初始化：state 中有 repoPath 且 repo 存在且是有效的同步仓库
-   */
   private async isAlreadyInitialized(repoPath: string): Promise<boolean> {
     try {
       const state = await loadState(this.agentDir);
@@ -614,96 +726,7 @@ export class PiSyncCommands {
     }
   }
 
-  // ============ apply (保留给高级用户，命令行直接调用) ============
-
-  async apply(repoPath?: string): Promise<string> {
-    const rp = repoPath ?? (await getRepoPath());
-    const config = await loadPiSyncConfig(rp);
-
-    await updateState(this.agentDir, { repoPath: rp });
-
-    const acquired = await this.lock.acquire("apply", 5000);
-    if (!acquired) {
-      return "Another sync operation is in progress.";
-    }
-
-    try {
-      return await this.applyCurrent(rp, config, "apply");
-    } finally {
-      await this.lock.release();
-    }
-  }
-
-  // ============ capture ============
-
-  async capture(repoPath?: string): Promise<string> {
-    const rp = repoPath ?? (await getRepoPath());
-    const config = await loadPiSyncConfig(rp);
-
-    const acquired = await this.lock.acquire("capture", 5000);
-    if (!acquired) {
-      return "Another sync operation is in progress.";
-    }
-
-    try {
-      const localSettings = await this.loadLocalSettings();
-
-      // Capture settings
-      const settingsResult = await mergeSettings(
-        localSettings,
-        rp,
-        config.settings,
-        hostname(),
-      );
-
-      // Only capture keys that are in managed settings but not yet set locally
-      const managedKeys = Object.keys(settingsResult.merged);
-      const extractedSettings = extractManagedSettings(localSettings, managedKeys);
-
-      if (Object.keys(extractedSettings).length > 0) {
-        const sharedSettingsPath = join(rp, config.settings.source);
-        let sharedSettings: Record<string, unknown> = {};
-
-        if (existsSync(sharedSettingsPath)) {
-          sharedSettings = JSON.parse(await readFile(sharedSettingsPath, "utf-8"));
-        }
-
-        // Merge extracted into shared (don't overwrite existing)
-        const merged = { ...extractedSettings, ...sharedSettings };
-        await writeFile(sharedSettingsPath, JSON.stringify(merged, null, 2), "utf-8");
-      }
-
-      // Capture files
-      const fileMappings = config.files.map((f) => ({
-        source: f.source,
-        target: f.target,
-      }));
-      const captureResult = await captureFiles(this.agentDir, rp, config, fileMappings);
-
-      const lines: string[] = ["Capture complete:"];
-      if (Object.keys(extractedSettings).length > 0) {
-        lines.push(`Settings captured: ${Object.keys(extractedSettings).join(", ")}`);
-      } else {
-        lines.push("Settings: nothing to capture (all managed keys already in repo)");
-      }
-
-      if (captureResult.captured.length > 0) {
-        lines.push(`Files captured: ${captureResult.captured.join(", ")}`);
-      }
-      if (captureResult.denied.length > 0) {
-        lines.push(`Files denied: ${captureResult.denied.join(", ")}`);
-      }
-      if (captureResult.skipped.length > 0) {
-        lines.push(`Files skipped: ${captureResult.skipped.join(", ")}`);
-      }
-
-      return lines.join("\n");
-    } finally {
-      await this.lock.release();
-    }
-  }
-
-  // ============ doctor ============
+  // ========== doctor ==========
 
   async doctor(repoPath?: string): Promise<string> {
     const rp = repoPath ?? (await getRepoPathSafe(this.agentDir));
@@ -714,319 +737,306 @@ export class PiSyncCommands {
     return formatDoctorResult(result);
   }
 
-  // ============ rollback ============
+  // ========== rollback ==========
 
   async rollback(repoPath?: string): Promise<string> {
     const rp = repoPath ?? (await getRepoPathSafe(this.agentDir));
     if (!rp) return "No config repo configured.";
 
     const config = await loadPiSyncConfig(rp);
-    const backups = await listBackups(this.agentDir);
 
-    if (backups.length === 0) {
-      return "No backups available for rollback.";
+    const acquired = await this.lock.acquire("rollback", 5000);
+    if (!acquired) {
+      return "Another sync operation is in progress.";
     }
 
-    const latestBackup = backups[0]!;
+    try {
+      const backups = await listBackups(this.agentDir);
+      if (backups.length === 0) {
+        return "No backups available for rollback.";
+      }
 
-    // 先创建当前状态的备份
-    const currentCommit = await getHeadCommit(rp).catch(() => "unknown");
-    await createBackup(
-      this.agentDir,
-      currentCommit,
-      "pre-rollback",
-      config.files.map((f) => ({ source: f.source, target: f.target })),
-    );
+      const latestBackup = backups[0]!;
 
-    // 恢复
-    await restoreBackup(
-      this.agentDir,
-      latestBackup,
-      config.files.map((f) => ({ source: f.source, target: f.target })),
-    );
+      // 先创建当前状态备份
+      const commit = await getHeadCommit(rp).catch(() => "unknown");
+      await createBackup(this.agentDir, commit, "pre-rollback");
 
-    return `Rolled back to backup: ${latestBackup.timestamp}\nCommit: ${latestBackup.commit}\nReason: ${latestBackup.reason}`;
+      // 恢复
+      await restoreBackup(this.agentDir, latestBackup);
+
+      return `Rolled back to backup: ${latestBackup.timestamp}\nCommit: ${latestBackup.commit}\nReason: ${latestBackup.reason}`;
+    } finally {
+      await this.lock.release();
+    }
   }
-
-  // ============ rollback-list ============
 
   async rollbackList(): Promise<string> {
     const backups = await listBackups(this.agentDir);
     return formatBackupList(backups);
   }
 
-  // ============ Private helpers ============
+  // ========== Private: applyCurrent ==========
 
-  private async loadLocalSettings(): Promise<Record<string, unknown>> {
-    const settingsPath = join(this.agentDir, "settings.json");
-    if (!existsSync(settingsPath)) return {};
-    try {
-      return JSON.parse(await readFile(settingsPath, "utf-8"));
-    } catch {
-      return {};
-    }
-  }
-
+  /**
+   * 将当前 repo 状态应用到 agent
+   */
   private async applyCurrent(
     rp: string,
     config: PiSyncConfig,
+    state: SyncState,
     reason: string,
-  ): Promise<string> {
+  ): Promise<{ message: string; reload: boolean }> {
     const commit = await getHeadCommit(rp);
     const lines: string[] = [];
 
-    // 备份
-    const backup = await createBackup(
-      this.agentDir,
-      commit,
-      reason,
-      config.files.map((f) => ({ source: f.source, target: f.target })),
-    );
+    // 1. 生成 apply 计划
+    const plan = await planMaterialize(this.agentDir, rp, config, state);
+
+    if (plan.blocked) {
+      const errorLines: string[] = [];
+      if (plan.conflicts.length > 0) {
+        errorLines.push("Bilateral conflicts detected:");
+        for (const c of plan.conflicts) {
+          errorLines.push(`  ${c.relativePath}`);
+        }
+      }
+      if (plan.validationErrors.length > 0) {
+        errorLines.push(formatValidationErrors(plan.validationErrors));
+      }
+      return { message: errorLines.join("\n"), reload: false };
+    }
+
+    if (plan.toWrite.length === 0 && plan.toDelete.length === 0) {
+      return { message: "Already up to date.", reload: false };
+    }
+
+    // 2. 创建备份
+    const backup = await createBackup(this.agentDir, commit, reason, plan);
     lines.push(`Backup created: ${backup.timestamp}`);
 
-    // 应用 settings
-    const localSettings = await this.loadLocalSettings();
-    const settingsResult = await mergeSettings(
-      localSettings,
-      rp,
-      config.settings,
-      hostname(),
-    );
+    // 3. 执行写入
+    const result = await executeMaterialize(this.agentDir, plan);
 
-    // 合并到本地 settings
-    const mergedSettings = deepMergeLocal(localSettings, settingsResult.merged);
-    const settingsPath = join(this.agentDir, "settings.json");
-    await writeFile(settingsPath, JSON.stringify(mergedSettings, null, 2), "utf-8");
-    lines.push(`Settings: ${Object.keys(settingsResult.changed).length} fields changed`);
-
-    // 应用文件
-    const materializeResult = await materializeFiles(
-      rp,
-      this.agentDir,
-      config.files,
-      join(this.agentDir, ".pi-sync", "backups", backup.timestamp, "data"),
-    );
-    if (materializeResult.applied.length > 0) {
-      lines.push(`Files: ${materializeResult.applied.length} applied`);
-    }
-    if (materializeResult.skipped.length > 0) {
-      lines.push(`Files skipped: ${materializeResult.skipped.join(", ")}`);
-    }
-    if (materializeResult.failed.length > 0) {
-      lines.push(`Files failed: ${materializeResult.failed.map((f) => `${f.file} (${f.reason})`).join(", ")}`);
+    if (result.failed.length > 0) {
+      // 失败 → 回滚
+      lines.push(`ERROR: ${result.failed.length} files failed to apply.`);
+      try {
+        await restoreBackup(this.agentDir, backup);
+        lines.push("Rolled back to pre-apply state.");
+      } catch (rollbackErr) {
+        lines.push(
+          `Rollback failed: ${rollbackErr instanceof Error ? rollbackErr.message : "Unknown"}. ` +
+          `Manual restore from backup: ${backup.path}`,
+        );
+      }
+      lines.push(`Failed files: ${result.failed.map((f) => f.file).join(", ")}`);
+      return { message: lines.join("\n"), reload: false };
     }
 
-    // 更新状态
+    if (result.written.length > 0) {
+      lines.push(`Files written: ${result.written.length}`);
+    }
+    if (result.deleted.length > 0) {
+      lines.push(`Files deleted: ${result.deleted.length}`);
+    }
+
+    // 4. 更新同步基线
+    const newBaseline: Record<string, { sha256: string; mode: number }> = {};
+    for (const relPath of result.written) {
+      const file = await readAgentFile(this.agentDir, relPath);
+      if (file) {
+        newBaseline[relPath] = { sha256: file.sha256, mode: file.mode };
+      }
+    }
+    // 删除的文件从基线中移除（由 result.deleted 隐式处理）
+
     await updateState(this.agentDir, {
-      lastAppliedCommit: commit,
-      lastAppliedAt: new Date().toISOString(),
+      lastSyncedCommit: commit,
+      lastSyncedAt: new Date().toISOString(),
       lastBackup: backup.timestamp,
-      managedSettings: Object.keys(settingsResult.merged),
+      files: { ...state.files, ...newBaseline },
+      pendingOperation: null,
     });
 
-    // Package reconciliation
+    // 5. Package reconciliation
     try {
-      const packageResult = await reconcilePackages(
-        rp,
-        this.agentDir,
-        config,
-      );
-      if (packageResult.installed.length > 0) {
-        lines.push(`Packages installed: ${packageResult.installed.join(", ")}`);
+      const pkgResult = await reconcilePackages(rp, this.agentDir, config);
+      if (pkgResult.installed.length > 0) {
+        lines.push(`Packages installed: ${pkgResult.installed.join(", ")}`);
       }
-      if (packageResult.removed.length > 0) {
-        lines.push(`Packages removed: ${packageResult.removed.join(", ")}`);
-      }
-      if (packageResult.errors.length > 0) {
-        lines.push(`Package errors: ${packageResult.errors.join("; ")}`);
+      if (pkgResult.errors.length > 0) {
+        lines.push(`Package errors: ${pkgResult.errors.join("; ")}`);
       }
     } catch {
-      // Package reconciliation is best-effort
+      // best-effort
     }
 
-    return lines.join("\n");
+    return { message: lines.join("\n"), reload: true };
   }
-}
 
-/**
- * 收集 Pi 包加载的内容目录（extensions/ skills/ prompts/ themes …）及其条目数量。
- *
- * 从 repo 的 package.json `pi` 字段读取声明的目录，避免硬编码 scaffold 默认结构。
- * best-effort：读取失败时返回空数组。
- */
-async function gatherSyncedDirs(
-  repoPath: string,
-): Promise<Array<{ dir: string; count: number }>> {
-  try {
-    const { readdir } = await import("node:fs/promises");
-    const pkgPath = join(repoPath, "package.json");
-    if (!existsSync(pkgPath)) return [];
-    const pkg = JSON.parse(await readFile(pkgPath, "utf-8"));
-    const piField = pkg?.pi;
-    if (typeof piField !== "object" || piField === null) return [];
+  // ========== Secret scan 辅助 ==========
 
-    const dirs: Array<{ dir: string; count: number }> = [];
-    for (const entries of Object.values(piField)) {
-      if (!Array.isArray(entries)) continue;
-      for (const raw of entries) {
-        if (typeof raw !== "string") continue;
-        // 声明形如 "./extensions" → 解析为相对 repo 的真实目录名
-        const rel = raw.replace(/^\.\//, "").replace(/\/$/, "");
-        if (!rel) continue;
-        const abs = join(repoPath, rel);
-        if (!existsSync(abs)) continue;
-        let count = 0;
-        try {
-          for (const ent of await readdir(abs, { withFileTypes: true })) {
-            if (ent.name.startsWith(".")) continue;
-            count++;
-          }
-        } catch {
-          count = 0;
+  private async scanForSecrets(
+    rp: string,
+    config: PiSyncConfig,
+  ): Promise<Array<{ type: string; file: string; line?: number }>> {
+    const findings: Array<{ type: string; file: string; line?: number }> = [];
+
+    // 扫描 staged diff
+    try {
+      const stagedDiff = await gitDiffStaged(rp);
+      if (stagedDiff) {
+        findings.push(...scanSecrets(stagedDiff, "staged-diff"));
+      }
+    } catch { /* */ }
+
+    // 扫描变更的完整文件
+    try {
+      const syncRoot = join(rp, config.root);
+      const { readdir: rd } = await import("node:fs/promises");
+      const { isPathAllowed } = await import("./glob.ts");
+
+      async function walk(dir: string): Promise<void> {
+        if (!existsSync(dir)) return;
+        let entries;
+        try { entries = await rd(dir, { withFileTypes: true }); } catch { return; }
+        for (const entry of entries) {
+          const fullPath = join(dir, entry.name);
+          const relPath = fullPath.replace(syncRoot + "/", "").replace(syncRoot, "");
+          if (entry.name.startsWith(".")) continue;
+          if (entry.isDirectory()) { await walk(fullPath); continue; }
+          if (!entry.isFile()) continue;
+
+          const allowed = isPathAllowed(relPath, config.include, config.exclude);
+          if (!allowed.allowed) continue;
+
+          try {
+            const content = await readFile(fullPath, "utf-8");
+            findings.push(...scanSecrets(content, relPath));
+          } catch { /* */ }
         }
-        dirs.push({ dir: rel, count });
+      }
+
+      await walk(syncRoot);
+    } catch { /* */ }
+
+    return findings;
+  }
+
+  private async getRepoSyncFiles(
+    rp: string,
+    config: PiSyncConfig,
+  ): Promise<string[]> {
+    const syncRoot = join(rp, config.root);
+    const files: string[] = [];
+    const { readdir: rd } = await import("node:fs/promises");
+
+    async function walk(dir: string): Promise<void> {
+      if (!existsSync(dir)) return;
+      let entries;
+      try { entries = await rd(dir, { withFileTypes: true }); } catch { return; }
+      for (const entry of entries) {
+        const fullPath = join(dir, entry.name);
+        const relPath = fullPath.replace(syncRoot + "/", "").replace(syncRoot, "");
+        if (entry.name.startsWith(".")) continue;
+        if (entry.isDirectory()) { await walk(fullPath); continue; }
+        if (entry.isFile()) files.push(relPath);
       }
     }
-    return dirs;
-  } catch {
-    return [];
+
+    await walk(syncRoot);
+    return files;
   }
 }
 
-/**
- * 检测仓库状态:
- * - "empty": 没有 commits（真正的空仓库）
- * - "valid": 有 pi-sync.json，是标准同步仓库
- * - "invalid": 有 commits 但没有 pi-sync.json
- */
+// ========== 辅助函数 ==========
+
 async function detectRepoState(repoPath: string): Promise<"empty" | "valid" | "invalid"> {
-  // 检查是否有 commits
   let hasCommits = false;
   try {
     const result = await gitExec(repoPath, ["rev-list", "--count", "HEAD"]);
     hasCommits = parseInt(result.stdout.trim(), 10) > 0;
   } catch {
-    // rev-list fails on truly empty repo (no HEAD)
     hasCommits = false;
   }
 
   if (!hasCommits) return "empty";
-
-  // Has commits — check for pi-sync.json
   if (existsSync(join(repoPath, "pi-sync.json"))) return "valid";
-
   return "invalid";
 }
 
 /**
- * 在空仓库中生成配置脚手架文件
+ * 在空仓库中生成 schema v2 脚手架
+ * 不再生成 package.json（配置仓库不是 Pi Package）
  */
-async function scaffoldConfigRepo(repoPath: string): Promise<void> {
-  const { mkdir, writeFile } = await import("node:fs/promises");
+async function scaffoldConfigRepoV2(repoPath: string): Promise<void> {
+  const { mkdir: mkd, writeFile: wf } = await import("node:fs/promises");
 
-  // Create directories
-  await mkdir(join(repoPath, "config", "machines"), { recursive: true });
-  await mkdir(join(repoPath, "extensions"), { recursive: true });
-  await mkdir(join(repoPath, "skills"), { recursive: true });
-  await mkdir(join(repoPath, "prompts"), { recursive: true });
-  await mkdir(join(repoPath, "themes"), { recursive: true });
-  await mkdir(join(repoPath, "files"), { recursive: true });
+  await mkd(join(repoPath, "sync"), { recursive: true });
+  await mkd(join(repoPath, "sync", "extensions"), { recursive: true });
+  await mkd(join(repoPath, "sync", "skills"), { recursive: true });
+  await mkd(join(repoPath, "sync", "prompts"), { recursive: true });
+  await mkd(join(repoPath, "sync", "themes"), { recursive: true });
 
-  // package.json
-  const pkgJson = {
-    name: "personal-pi-config",
-    private: true,
-    keywords: ["pi-package"],
-    pi: {
-      extensions: ["./extensions"],
-      skills: ["./skills"],
-      prompts: ["./prompts"],
-      themes: ["./themes"],
-    },
-  };
-  await writeFile(join(repoPath, "package.json"), JSON.stringify(pkgJson, null, 2), "utf-8");
-
-  // pi-sync.json
+  // pi-sync.json (schema v2)
   const piSync = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     branch: "main",
-    settings: {
-      source: "config/settings.shared.json",
-      strategy: "managed-keys",
-      preserve: ["lastChangelogVersion", "trackingId", "httpProxy"],
-    },
-    files: [
-      { source: "files/AGENTS.md", target: "AGENTS.md" },
-      { source: "files/SYSTEM.md", target: "SYSTEM.md", optional: true },
-      { source: "files/keybindings.json", target: "keybindings.json", optional: true },
+    root: "sync",
+    include: [
+      "settings.json",
+      "AGENTS.md",
+      "SYSTEM.md",
+      "APPEND_SYSTEM.md",
+      "keybindings.json",
+      "extensions/**",
+      "skills/**",
+      "prompts/**",
+      "themes/**",
     ],
+    exclude: [
+      "**/.DS_Store",
+      "**/*.tmp",
+      "**/*.log",
+    ],
+    delete: "tracked",
     security: {
-      deny: ["auth.json", "trust.json", "sessions/**", "**/.env"],
       scanSecretsBeforePush: true,
     },
   };
-  await writeFile(join(repoPath, "pi-sync.json"), JSON.stringify(piSync, null, 2), "utf-8");
+  await wf(join(repoPath, "pi-sync.json"), JSON.stringify(piSync, null, 2), "utf-8");
 
-  // config/settings.shared.json (empty, to be populated by capture)
-  await writeFile(join(repoPath, "config", "settings.shared.json"), "{}", "utf-8");
+  // sync/settings.json (空模板)
+  await wf(
+    join(repoPath, "sync", "settings.json"),
+    JSON.stringify({
+      packages: [
+        "npm:@jachy/pi-git-sync",
+      ],
+    }, null, 2),
+    "utf-8",
+  );
 
   // .gitignore
-  await writeFile(join(repoPath, ".gitignore"), "# Local state — never sync\n.pi-sync/\n", "utf-8");
+  await wf(join(repoPath, ".gitignore"), "# Local state\n.pi-sync/\n", "utf-8");
 }
 
-/**
- * 校验 Git URL 格式
- */
 function isValidGitUrl(url: string): boolean {
-  // git@host:path  (SCP-like syntax; no explicit port in this form)
   if (/^git@[\w.-]+:[\w./-]+(\.git)?$/.test(url)) return true;
-  // https://host[:port]/path(.git)?
   if (/^https?:\/\/[\w.-]+(:\d+)?\/[\w./-]+(\.git)?$/.test(url)) return true;
-  // ssh://git@host[:port]/path(.git)?
   if (/^ssh:\/\/git@[\w.-]+(:\d+)?\/[\w./-]+(\.git)?$/.test(url)) return true;
-  // git://host[:port]/path(.git)?
-  if (/^git:\/\/[\w.-]+(:\d+)?\/[\w./-]+(\.git)?$/.test(url)) return true;
   return false;
 }
 
-/**
- * 比较两个 Git URL 是否指向同一个仓库
- */
 function urlsMatch(a: string, b: string): boolean {
   const normalize = (url: string) =>
     url
       .replace(/^https?:\/\//, "")
       .replace(/^ssh:\/\/git@/, "")
       .replace(/^git@/, "")
-      .replace(/^git:\/\//, "")
       .replace(/\.git$/, "")
-      .replace(/:\d+\//, "/") // strip port
+      .replace(/:\d+\//, "/")
       .toLowerCase();
   return normalize(a) === normalize(b);
-}
-
-/**
- * 深度合并到本地 settings（保护 preserved 字段）
- */
-function deepMergeLocal(
-  local: Record<string, unknown>,
-  managed: Record<string, unknown>,
-): Record<string, unknown> {
-  const result = { ...local };
-
-  for (const [key, value] of Object.entries(managed)) {
-    if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-      const localVal = result[key];
-      if (typeof localVal === "object" && localVal !== null && !Array.isArray(localVal)) {
-        result[key] = deepMergeLocal(
-          localVal as Record<string, unknown>,
-          value as Record<string, unknown>,
-        );
-        continue;
-      }
-    }
-    result[key] = value;
-  }
-
-  return result;
 }

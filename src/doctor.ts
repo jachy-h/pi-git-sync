@@ -1,19 +1,22 @@
 /**
- * 环境和配置诊断（/pisync doctor）
+ * 环境与配置诊断（/pisync doctor）
  *
  * 检查：
- * - Git 和 SSH 是否可用
+ * - Git 和 SSH 可用性
  * - Origin 是否为预期仓库
- * - JSON 格式是否正确
- * - Skill frontmatter 是否有效
+ * - JSON 格式
+ * - 设置可移植性（绝对路径、package 来源等）
+ * - pi-git-sync 是否在 packages 中
  * - 文件权限
- * - 仓库路径是否已正确加入 Pi Settings
+ * - 符号链接
  */
-import { access, stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { gitExec } from "./git.ts";
 import type { PiSyncConfig } from "./config.ts";
+
+// ========== 类型 ==========
 
 export interface DoctorCheck {
   name: string;
@@ -26,9 +29,8 @@ export interface DoctorResult {
   summary: { ok: number; warning: number; error: number };
 }
 
-/**
- * 运行所有诊断检查
- */
+// ========== 运行所有检查 ==========
+
 export async function runDoctorChecks(
   repoPath: string,
   agentDir: string,
@@ -36,35 +38,16 @@ export async function runDoctorChecks(
 ): Promise<DoctorResult> {
   const checks: DoctorCheck[] = [];
 
-  // 1. Git 可用性
   checks.push(await checkGitAvailable());
-
-  // 2. SSH 可用性
   checks.push(await checkSshAvailable(repoPath));
-
-  // 3. 仓库路径存在
   checks.push(await checkRepoExists(repoPath));
-
-  // 4. Remote origin 检查
   checks.push(await checkRemoteOrigin(repoPath));
-
-  // 5. pi-sync.json 格式
   checks.push(checkConfigFormat(config));
-
-  // 6. settings.shared.json 格式
-  checks.push(await checkSettingsFormat(repoPath, config));
-
-  // 7. 文件权限安全
+  checks.push(await checkSettingsPortability(repoPath, config));
+  checks.push(await checkPiGitSyncInPackages(repoPath, config));
   checks.push(await checkFilePermissions(repoPath));
-
-  // 8. 符号链接检查
   checks.push(await checkSymlinks(repoPath));
-
-  // 9. 绝对路径泄漏检查
-  checks.push(await checkAbsolutePaths(repoPath));
-
-  // 10. 仓库在 Pi Settings 中
-  checks.push(checkRepoInPiSettings(repoPath, agentDir));
+  checks.push(await checkAbsolutePaths(repoPath, config));
 
   const summary = {
     ok: checks.filter((c) => c.status === "ok").length,
@@ -75,6 +58,8 @@ export async function runDoctorChecks(
   return { checks, summary };
 }
 
+// ========== 各项检查 ==========
+
 async function checkGitAvailable(): Promise<DoctorCheck> {
   try {
     const result = await gitExec(process.cwd(), ["--version"]);
@@ -83,11 +68,7 @@ async function checkGitAvailable(): Promise<DoctorCheck> {
     }
     return { name: "Git", status: "error", message: "Git not found" };
   } catch {
-    return {
-      name: "Git",
-      status: "error",
-      message: "Git command not available in PATH",
-    };
+    return { name: "Git", status: "error", message: "Git command not available in PATH" };
   }
 }
 
@@ -96,32 +77,17 @@ async function checkSshAvailable(repoPath: string): Promise<DoctorCheck> {
     const result = await gitExec(repoPath, ["remote", "get-url", "origin"]);
     const url = result.stdout.trim();
     if (!url) {
-      return {
-        name: "SSH",
-        status: "warning",
-        message: "No 'origin' remote configured",
-      };
+      return { name: "SSH", status: "warning", message: "No 'origin' remote configured" };
     }
     if (!/^git@|^ssh:\/\//.test(url)) {
-      return {
-        name: "SSH",
-        status: "ok",
-        message: "HTTPS remote (SSH check skipped)",
-      };
+      return { name: "SSH", status: "ok", message: "HTTPS remote (SSH check skipped)" };
     }
 
-    // Actually probe the remote end-to-end (auth + host key + network).
-    // Uses the same accept-new SSH options as clone, so first contact won't hang.
-    const probe = await gitExec(
-      repoPath,
-      ["ls-remote", "origin"],
-      { timeout: 20000 },
-    );
+    const probe = await gitExec(repoPath, ["ls-remote", "origin"], { timeout: 20000 });
     const hostMatch = url.match(/(?:git@|ssh:\/\/git@)([^:/]+)/);
     const host = hostMatch?.[1] ?? "remote";
 
-    const failPattern = /fatal:|error:|Permission denied|Could not read from remote|Host key verification failed/i;
-    if (failPattern.test(`${probe.stderr}\n${probe.stdout}`)) {
+    if (/fatal:|error:|Permission denied|Could not read from remote|Host key verification failed/i.test(`${probe.stderr}\n${probe.stdout}`)) {
       return {
         name: "SSH",
         status: "error",
@@ -129,17 +95,9 @@ async function checkSshAvailable(repoPath: string): Promise<DoctorCheck> {
           "Tip: run `ssh -T git@github.com` in a terminal to confirm access.",
       };
     }
-    return {
-      name: "SSH",
-      status: "ok",
-      message: `Authenticated to ${host} (${url})`,
-    };
+    return { name: "SSH", status: "ok", message: `Authenticated to ${host} (${url})` };
   } catch {
-    return {
-      name: "SSH",
-      status: "warning",
-      message: "Could not determine remote URL",
-    };
+    return { name: "SSH", status: "warning", message: "Could not determine remote URL" };
   }
 }
 
@@ -148,11 +106,7 @@ async function checkRepoExists(repoPath: string): Promise<DoctorCheck> {
   if (existsSync(gitDir)) {
     return { name: "Repository", status: "ok", message: `Found at ${repoPath}` };
   }
-  return {
-    name: "Repository",
-    status: "error",
-    message: `Not a git repository: ${repoPath}`,
-  };
+  return { name: "Repository", status: "error", message: `Not a git repository: ${repoPath}` };
 }
 
 async function checkRemoteOrigin(repoPath: string): Promise<DoctorCheck> {
@@ -160,65 +114,122 @@ async function checkRemoteOrigin(repoPath: string): Promise<DoctorCheck> {
     const result = await gitExec(repoPath, ["remote", "get-url", "origin"]);
     const url = result.stdout.trim();
     if (url) {
-      return {
-        name: "Remote",
-        status: "ok",
-        message: `Origin: ${url}`,
-      };
+      return { name: "Remote", status: "ok", message: `Origin: ${url}` };
     }
-    return {
-      name: "Remote",
-      status: "warning",
-      message: "No 'origin' remote configured",
-    };
+    return { name: "Remote", status: "warning", message: "No 'origin' remote configured" };
   } catch {
-    return {
-      name: "Remote",
-      status: "warning",
-      message: "No 'origin' remote configured",
-    };
+    return { name: "Remote", status: "warning", message: "No 'origin' remote configured" };
   }
 }
 
 function checkConfigFormat(config: PiSyncConfig): DoctorCheck {
-  // Already validated by loadPiSyncConfig
   return {
     name: "pi-sync.json",
     status: "ok",
-    message: `Schema v${config.schemaVersion}, ${config.files.length} file mappings`,
+    message: `Schema v${config.schemaVersion}, root="${config.root}", ${config.include.length} include patterns`,
   };
 }
 
-async function checkSettingsFormat(
+async function checkSettingsPortability(
   repoPath: string,
   config: PiSyncConfig,
 ): Promise<DoctorCheck> {
-  const settingsPath = join(repoPath, config.settings.source);
+  const settingsPath = join(repoPath, config.root, "settings.json");
   if (!existsSync(settingsPath)) {
     return {
-      name: "Settings",
-      status: "warning",
-      message: `settings.shared.json not found at ${config.settings.source}`,
+      name: "Settings Portability",
+      status: "ok",
+      message: "No settings.json in sync root (nothing to check)",
     };
   }
+
+  const warnings: string[] = [];
+
   try {
-    const content = await access(settingsPath); // just check readability
+    const content = await readFile(settingsPath, "utf-8");
+    const settings = JSON.parse(content);
+
+    // 检查 packages
+    const packages = settings.packages;
+    if (Array.isArray(packages)) {
+      for (const pkg of packages) {
+        if (typeof pkg === "string" && (pkg.startsWith("/") || pkg.startsWith("~/"))) {
+          warnings.push(`Absolute package path: ${pkg}`);
+        }
+      }
+    }
+
+    // 检查可疑的绝对路径
+    const contentStr = JSON.stringify(settings);
+    if (/\/home\/|\/Users\//.test(contentStr)) {
+      warnings.push("Contains paths that look machine-specific (/home/ or /Users/)");
+    }
+
+    // 检查 externalEditor
+    if (typeof settings.externalEditor === "string" && settings.externalEditor.startsWith("/")) {
+      warnings.push("externalEditor is an absolute path");
+    }
+  } catch (err) {
     return {
-      name: "Settings",
-      status: "ok",
-      message: `${config.settings.source} is valid`,
+      name: "Settings Portability",
+      status: "error",
+      message: `Cannot parse settings.json: ${err instanceof Error ? err.message : "Unknown"}`,
+    };
+  }
+
+  if (warnings.length > 0) {
+    return {
+      name: "Settings Portability",
+      status: "warning",
+      message: warnings.join("; "),
+    };
+  }
+
+  return { name: "Settings Portability", status: "ok", message: "No portability issues detected" };
+}
+
+async function checkPiGitSyncInPackages(
+  repoPath: string,
+  config: PiSyncConfig,
+): Promise<DoctorCheck> {
+  const settingsPath = join(repoPath, config.root, "settings.json");
+  if (!existsSync(settingsPath)) {
+    return {
+      name: "pi-git-sync in Packages",
+      status: "warning",
+      message: "settings.json not found — cannot verify pi-git-sync is declared",
+    };
+  }
+
+  try {
+    const content = await readFile(settingsPath, "utf-8");
+    const settings = JSON.parse(content);
+    const packages: unknown[] = settings.packages ?? [];
+
+    const hasPiGitSync = packages.some(
+      (p: unknown) => typeof p === "string" && (
+        p.includes("pi-git-sync") || p.includes("jachy/pi-git-sync")
+      ),
+    );
+
+    if (hasPiGitSync) {
+      return { name: "pi-git-sync in Packages", status: "ok", message: "pi-git-sync is declared" };
+    }
+    return {
+      name: "pi-git-sync in Packages",
+      status: "error",
+      message: 'packages should include "npm:@jachy/pi-git-sync" to ensure it loads after sync',
     };
   } catch {
     return {
-      name: "Settings",
-      status: "error",
-      message: "Cannot read settings.shared.json",
+      name: "pi-git-sync in Packages",
+      status: "warning",
+      message: "Could not parse settings.json",
     };
   }
 }
 
 async function checkFilePermissions(repoPath: string): Promise<DoctorCheck> {
-  // Check that sensitive-looking files don't have overly permissive permissions
   const sensitivePatterns = [
     join(repoPath, ".git", "config"),
     join(repoPath, "pi-sync.json"),
@@ -239,17 +250,13 @@ async function checkFilePermissions(repoPath: string): Promise<DoctorCheck> {
   }
 
   if (warnings.length > 0) {
-    return {
-      name: "Permissions",
-      status: "warning",
-      message: warnings.join("; "),
-    };
+    return { name: "Permissions", status: "warning", message: warnings.join("; ") };
   }
   return { name: "Permissions", status: "ok", message: "No permission issues" };
 }
 
 async function checkSymlinks(repoPath: string): Promise<DoctorCheck> {
-  const checkDirs = ["skills", "extensions", "prompts", "themes", "config", "files"];
+  const checkDirs = ["sync", "skills", "extensions", "prompts", "themes"];
   const warnings: string[] = [];
 
   for (const dir of checkDirs) {
@@ -266,29 +273,22 @@ async function checkSymlinks(repoPath: string): Promise<DoctorCheck> {
   }
 
   if (warnings.length > 0) {
-    return {
-      name: "Symlinks",
-      status: "warning",
-      message: warnings.join("; "),
-    };
+    return { name: "Symlinks", status: "warning", message: warnings.join("; ") };
   }
   return { name: "Symlinks", status: "ok", message: "No problematic symlinks" };
 }
 
-async function checkAbsolutePaths(repoPath: string): Promise<DoctorCheck> {
-  const checkFiles = [
-    join(repoPath, "config", "settings.shared.json"),
-    join(repoPath, "config", "settings.macos.json"),
-    join(repoPath, "config", "settings.linux.json"),
-  ];
-
+async function checkAbsolutePaths(
+  repoPath: string,
+  config: PiSyncConfig,
+): Promise<DoctorCheck> {
+  const checkFiles = [join(repoPath, config.root, "settings.json")];
   const warnings: string[] = [];
+
   for (const file of checkFiles) {
     if (!existsSync(file)) continue;
     try {
-      const { readFile } = await import("node:fs/promises");
       const content = await readFile(file, "utf-8");
-      // Look for /home/ or /Users/ patterns
       if (/\/home\/|\/Users\//.test(content)) {
         warnings.push(`${file} may contain absolute paths`);
       }
@@ -298,29 +298,7 @@ async function checkAbsolutePaths(repoPath: string): Promise<DoctorCheck> {
   }
 
   if (warnings.length > 0) {
-    return {
-      name: "Absolute Paths",
-      status: "warning",
-      message: warnings.join("; "),
-    };
+    return { name: "Absolute Paths", status: "warning", message: warnings.join("; ") };
   }
   return { name: "Absolute Paths", status: "ok", message: "No absolute paths found" };
-}
-
-function checkRepoInPiSettings(repoPath: string, agentDir: string): DoctorCheck {
-  const settingsPath = join(agentDir, "settings.json");
-  if (!existsSync(settingsPath)) {
-    return {
-      name: "Pi Settings",
-      status: "warning",
-      message: "settings.json not found - is Pi initialized?",
-    };
-  }
-  // Note: We can't fully verify without reading settings.json
-  // This check is best-effort
-  return {
-    name: "Pi Settings",
-    status: "ok",
-    message: "settings.json exists",
-  };
 }

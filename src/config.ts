@@ -1,76 +1,68 @@
 /**
- * pi-sync.json 读取、校验和类型定义
+ * pi-sync.json schema v2 读取、校验和类型定义
+ *
+ * 与 v1 的关键差异：
+ * - root + include/exclude glob 白名单取代 files[] 逐文件映射
+ * - settings.json 作为完整共享文件，不再做 managed-key merge
+ * - 配置仓库不再作为 Pi Package 安装
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export interface PiSyncFileMapping {
-  source: string;
-  target: string;
-  optional?: boolean;
-}
+// ========== Schema v2 类型 ==========
 
-export interface PiSyncSettings {
-  source: string;
-  strategy: "managed-keys";
-  preserve: string[];
+export interface PiSyncConfig {
+  schemaVersion: 2;
+  /** Git 分支名，默认 "main" */
+  branch: string;
+  /** 仓库内的同步根目录，相对路径，默认 "sync" */
+  root: string;
+  /** Glob 白名单，相对于 root */
+  include: string[];
+  /** Glob 排除列表，优先级高于 include（但低于内置 hard deny） */
+  exclude: string[];
+  /** 删除语义："tracked" 表示只删除上次同步基线中已管理的文件 */
+  delete: "tracked" | "none";
+  /** 安全配置 */
+  security: PiSyncSecurity;
 }
 
 export interface PiSyncSecurity {
-  deny: string[];
   scanSecretsBeforePush: boolean;
 }
 
-export interface PiSyncConfig {
-  schemaVersion: number;
-  branch?: string;
-  settings: PiSyncSettings;
-  files: PiSyncFileMapping[];
-  security: PiSyncSecurity;
-  auto?: {
-    checkOnStartup?: boolean;
-    pullOnStartup?: boolean;
-    pushOnShutdown?: boolean;
-  };
-}
+// ========== 默认配置 ==========
 
 export const DEFAULT_CONFIG: PiSyncConfig = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   branch: "main",
-  settings: {
-    source: "config/settings.shared.json",
-    strategy: "managed-keys",
-    preserve: [
-      "lastChangelogVersion",
-      "trackingId",
-      "httpProxy",
-      "sessionDir",
-      "externalEditor",
-      "npmCommand",
-    ],
-  },
-  files: [
-    { source: "files/AGENTS.md", target: "AGENTS.md" },
-    { source: "files/SYSTEM.md", target: "SYSTEM.md", optional: true },
-    { source: "files/keybindings.json", target: "keybindings.json", optional: true },
-    { source: "files/zentui.json", target: "zentui.json", optional: true },
+  root: "sync",
+  include: [
+    "settings.json",
+    "AGENTS.md",
+    "SYSTEM.md",
+    "APPEND_SYSTEM.md",
+    "keybindings.json",
+    "extensions/**",
+    "skills/**",
+    "prompts/**",
+    "themes/**",
   ],
+  exclude: [
+    "**/.DS_Store",
+    "**/*.tmp",
+    "**/*.log",
+  ],
+  delete: "tracked",
   security: {
-    deny: [
-      "auth.json",
-      "trust.json",
-      "sessions/**",
-      "models-store.json",
-      "**/.env",
-      "**/*.pem",
-      "**/id_rsa",
-    ],
     scanSecretsBeforePush: true,
   },
 };
 
+// ========== 加载与校验 ==========
+
 /**
- * 加载并校验 pi-sync.json
+ * 加载并校验 pi-sync.json（仅支持 schema v2）
  */
 export async function loadPiSyncConfig(repoPath: string): Promise<PiSyncConfig> {
   const configPath = join(repoPath, "pi-sync.json");
@@ -87,52 +79,69 @@ export async function loadPiSyncConfig(repoPath: string): Promise<PiSyncConfig> 
 }
 
 /**
- * 校验配置对象
+ * 校验配置对象（schema v2）
  */
 export function validateConfig(raw: Record<string, unknown>): PiSyncConfig {
-  if (raw.schemaVersion !== 1) {
-    throw new Error(`Unsupported schemaVersion: ${raw.schemaVersion}. Expected 1.`);
-  }
-
-  const settings = raw.settings as Record<string, unknown> | undefined;
-  if (!settings || typeof settings.source !== "string") {
-    throw new Error("pi-sync.json: settings.source is required and must be a string.");
-  }
-  if (settings.strategy !== "managed-keys") {
+  const version = raw.schemaVersion;
+  if (version !== 2) {
     throw new Error(
-      `pi-sync.json: Unsupported settings strategy "${settings.strategy}". Currently only "managed-keys" is supported.`,
+      `Unsupported schemaVersion: ${version}. This version of pi-git-sync requires schemaVersion 2. ` +
+      `If you have a v1 config, please migrate to the new format.`,
     );
   }
-  if (!Array.isArray(settings.preserve)) {
-    throw new Error("pi-sync.json: settings.preserve must be an array of strings.");
+
+  // root
+  const root = typeof raw.root === "string" ? raw.root : "sync";
+  if (root.includes("..") || root === "/" || root === "") {
+    throw new Error("pi-sync.json: root must be a relative path and must not contain '..'.");
   }
 
-  const files = raw.files;
-  if (files !== undefined && !Array.isArray(files)) {
-    throw new Error("pi-sync.json: files must be an array.");
+  // include
+  const include = raw.include;
+  if (!Array.isArray(include) || include.length === 0) {
+    throw new Error("pi-sync.json: include must be a non-empty array of glob patterns.");
   }
-
-  const security = raw.security as Record<string, unknown> | undefined;
-  if (security) {
-    if (security.deny !== undefined && !Array.isArray(security.deny)) {
-      throw new Error("pi-sync.json: security.deny must be an array.");
+  for (const pattern of include) {
+    if (typeof pattern !== "string") {
+      throw new Error("pi-sync.json: each include entry must be a string.");
+    }
+    if (pattern.includes("..") || pattern.startsWith("/")) {
+      throw new Error(`pi-sync.json: invalid include pattern "${pattern}". Patterns must be relative and must not contain "..".`);
     }
   }
 
+  // exclude
+  const exclude = raw.exclude;
+  if (exclude !== undefined) {
+    if (!Array.isArray(exclude)) {
+      throw new Error("pi-sync.json: exclude must be an array of glob patterns.");
+    }
+    for (const pattern of exclude as string[]) {
+      if (typeof pattern !== "string") {
+        throw new Error("pi-sync.json: each exclude entry must be a string.");
+      }
+    }
+  }
+
+  // delete
+  const del = raw.delete;
+  if (del !== undefined && del !== "tracked" && del !== "none") {
+    throw new Error('pi-sync.json: delete must be "tracked" or "none".');
+  }
+
+  // security
+  const security = raw.security as Record<string, unknown> | undefined;
+
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     branch: (typeof raw.branch === "string" ? raw.branch : undefined) ?? "main",
-    settings: {
-      source: settings.source as string,
-      strategy: "managed-keys",
-      preserve: settings.preserve as string[],
-    },
-    files: (files as PiSyncFileMapping[] | undefined) ?? [],
+    root,
+    include: include as string[],
+    exclude: (exclude as string[] | undefined) ?? [],
+    delete: (del as "tracked" | "none" | undefined) ?? "tracked",
     security: {
-      deny: (security?.deny as string[] | undefined) ?? [],
       scanSecretsBeforePush:
         (security?.scanSecretsBeforePush as boolean | undefined) ?? true,
     },
-    auto: raw.auto as PiSyncConfig["auto"] | undefined,
-  } satisfies PiSyncConfig;
+  };
 }

@@ -1,73 +1,123 @@
 /**
- * 本地配置导入仓库（capture）
+ * Capture: agent → repo
  *
- * 用于首次迁移，把本机允许同步的内容导入仓库。
+ * 将 agent 中的本地变更复制到配置仓库的 sync/ 目录。
+ *
+ * 流程：
+ * 1. 扫描 agent 和 repo 的白名单文件集合
+ * 2. 根据基线检测双边修改
+ * 3. 双边修改时停止，不覆盖任一方
+ * 4. 把仅本地修改复制到 repo
+ * 5. 把 agent 中对已管理文件的删除反映到 repo
+ * 6. 校验捕获结果
  */
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join, basename, dirname } from "node:path";
-import { isDenied } from "./security.ts";
+import { join, dirname } from "node:path";
 import type { PiSyncConfig } from "./config.ts";
+import type { SyncState } from "./state.ts";
+import {
+  compareFiles,
+  getCapturableFiles,
+  hasBilateralConflicts,
+  sha256File,
+  type FileComparison,
+  type FileEntry,
+} from "./inventory.ts";
+import { normalizePath, isPathAllowed } from "./glob.ts";
+import { isDenied } from "./security.ts";
+import { atomicWrite } from "./materialize.ts";
 
 export interface CaptureResult {
-  /** 已导入的文件 */
+  /** 已捕获的文件路径 */
   captured: string[];
-  /** 被 denylist 阻止的文件 */
+  /** 已删除的文件路径 */
+  deleted: string[];
+  /** 被 hard deny 阻止的文件 */
   denied: string[];
-  /** 跳过的文件（目标已存在） */
-  skipped: string[];
-  /** 失败的文件 */
-  failed: Array<{ file: string; reason: string }>;
+  /** 错误 */
+  errors: Array<{ file: string; message: string }>;
+  /** 是否有双边冲突 */
+  hasConflicts: boolean;
+  /** 冲突详情 */
+  conflicts: FileComparison[];
 }
 
 /**
- * 将本地文件导入仓库对应位置
+ * 将 agent 变更捕获到 repo 工作树（不访问网络、不 commit、不 push）
  */
-export async function captureFiles(
+export async function captureChanges(
   agentDir: string,
   repoPath: string,
   config: PiSyncConfig,
-  files: Array<{ source: string; target: string }>,
+  state: SyncState,
 ): Promise<CaptureResult> {
+  const syncRoot = join(repoPath, config.root);
+  const inventory = await compareFiles(agentDir, repoPath, config, state);
+
   const result: CaptureResult = {
     captured: [],
+    deleted: [],
     denied: [],
-    skipped: [],
-    failed: [],
+    errors: [],
+    hasConflicts: false,
+    conflicts: [],
   };
 
-  for (const mapping of files) {
-    const localPath = join(agentDir, mapping.target);
-    const repoPathFull = join(repoPath, mapping.source);
+  // 1. 检查双边冲突
+  const bilateralConflicts = inventory.comparisons.filter(
+    (c) =>
+      c.changeType === "both_modified" ||
+      c.changeType === "local_modified_remote_deleted" ||
+      c.changeType === "local_deleted_remote_modified",
+  );
+  if (bilateralConflicts.length > 0) {
+    result.hasConflicts = true;
+    result.conflicts = bilateralConflicts;
+    return result;
+  }
 
+  // 2. 处理仅本地变更
+  const capturable = getCapturableFiles(inventory.comparisons);
+
+  for (const comp of capturable) {
     try {
-      // denylist 检查
-      if (isDenied(mapping.target, config.security.deny)) {
-        result.denied.push(mapping.target);
+      const relPath = comp.relativePath;
+
+      // Hard deny 检查
+      if (isDenied(relPath)) {
+        result.denied.push(relPath);
         continue;
       }
 
-      // 本地文件是否存在
-      if (!existsSync(localPath)) {
-        result.skipped.push(mapping.target);
-        continue;
+      // 白名单检查
+      const allowed = isPathAllowed(relPath, config.include, config.exclude);
+      if (!allowed.allowed) {
+        continue; // 不在白名单内，静默跳过
       }
 
-      // 检查仓库中是否已有该文件
-      if (existsSync(repoPathFull)) {
-        result.skipped.push(mapping.target);
-        continue;
-      }
+      const repoFilePath = join(syncRoot, relPath);
+      const agentFilePath = join(agentDir, relPath);
 
-      // 复制文件到仓库
-      const content = await readFile(localPath);
-      await mkdir(dirname(repoPathFull), { recursive: true });
-      await writeFile(repoPathFull, content);
-      result.captured.push(mapping.target);
+      if (comp.changeType === "local_deleted") {
+        // agent 中删除了，repo 中也删除
+        if (existsSync(repoFilePath)) {
+          await unlink(repoFilePath);
+          result.deleted.push(relPath);
+        }
+      } else if (comp.changeType === "local_only" || comp.changeType === "local_created") {
+        // agent 中有新内容或修改，复制到 repo
+        if (existsSync(agentFilePath)) {
+          const content = await readFile(agentFilePath);
+          await mkdir(dirname(repoFilePath), { recursive: true });
+          await writeFile(repoFilePath, content);
+          result.captured.push(relPath);
+        }
+      }
     } catch (err) {
-      result.failed.push({
-        file: mapping.target,
-        reason: err instanceof Error ? err.message : "Unknown error",
+      result.errors.push({
+        file: comp.relativePath,
+        message: err instanceof Error ? err.message : "Unknown error",
       });
     }
   }
@@ -76,19 +126,39 @@ export async function captureFiles(
 }
 
 /**
- * 从本地 settings.json 中提取 managed keys
+ * 验证捕获结果的一致性
+ * 确保 repo 中已捕获的文件与 agent 源文件一致
  */
-export function extractManagedSettings(
-  localSettings: Record<string, unknown>,
-  managedKeys: string[],
-): Record<string, unknown> {
-  const extracted: Record<string, unknown> = {};
+export async function verifyCapture(
+  agentDir: string,
+  repoPath: string,
+  config: PiSyncConfig,
+  files: string[],
+): Promise<Array<{ file: string; match: boolean; error?: string }>> {
+  const syncRoot = join(repoPath, config.root);
+  const results: Array<{ file: string; match: boolean; error?: string }> = [];
 
-  for (const key of managedKeys) {
-    if (key in localSettings) {
-      extracted[key] = localSettings[key];
+  for (const relPath of files) {
+    try {
+      const agentPath = join(agentDir, relPath);
+      const repoPath_ = join(syncRoot, relPath);
+
+      if (!existsSync(agentPath) || !existsSync(repoPath_)) {
+        results.push({ file: relPath, match: false, error: "File missing from one side" });
+        continue;
+      }
+
+      const agentHash = await sha256File(agentPath);
+      const repoHash = await sha256File(repoPath_);
+      results.push({ file: relPath, match: agentHash === repoHash });
+    } catch (err) {
+      results.push({
+        file: relPath,
+        match: false,
+        error: err instanceof Error ? err.message : "Unknown",
+      });
     }
   }
 
-  return extracted;
+  return results;
 }

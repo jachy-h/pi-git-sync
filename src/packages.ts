@@ -1,40 +1,35 @@
 /**
- * 第三方 Package reconciliation
+ * Package reconciliation
  *
- * 比较仓库 settings.shared.json 中声明的 packages 和本地 settings.json，
- * 提供 diff 和安装能力。
+ * 比较共享 settings.json 与本地 settings.json 中的 packages 声明。
+ * 只同步 package 来源声明，不复制 npm/、git/、node_modules/。
  *
- * 注意：不保存实际的 npm/、git/ 或 node_modules/ 内容。
- * 只同步 packages 声明。
+ * 注意：不会自动卸载本地独有的 package（避免移除 pi-git-sync 自身）。
  */
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { exec as execCb } from "node:child_process";
+import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import type { PiSyncConfig } from "./config.ts";
 
-const execAsync = promisify(execCb);
+const execFileAsync = promisify(execFileCb);
+
+// ========== 类型 ==========
 
 export interface PackageDiff {
-  /** 仓库中有但本地没有的 packages */
   added: string[];
-  /** 本地有但仓库中没有的 packages */
   removed: string[];
-  /** 两个地方都有但声明不同的 packages */
   changed: string[];
-  /** 未变化的 packages */
   unchanged: string[];
 }
 
 export interface ReconcileResult {
-  /** 成功安装的 packages */
   installed: string[];
-  /** 保留字段，自动 reconcile 不会卸载 package */
-  removed: string[];
-  /** 安装或更新时的错误 */
   errors: string[];
 }
+
+// ========== 差异计算 ==========
 
 /**
  * 从 settings JSON 中提取 packages 列表
@@ -55,20 +50,20 @@ function extractPackages(settings: Record<string, unknown>): string[] {
 }
 
 /**
- * 获取 repo 和本地 packages 之间的差异
+ * 获取 repo sync/settings.json 与本地 settings.json 之间的 package 差异
  */
 export async function getPackageDiff(
   repoPath: string,
   agentDir: string,
   config: PiSyncConfig,
 ): Promise<PackageDiff> {
-  // 读取仓库中的 shared settings
-  const sharedSettingsPath = join(repoPath, config.settings.source);
-  const repoSettings: Record<string, unknown> = existsSync(sharedSettingsPath)
-    ? JSON.parse(await readFile(sharedSettingsPath, "utf-8"))
+  // 读取 repo sync/settings.json
+  const repoSettingsPath = join(repoPath, config.root, "settings.json");
+  const repoSettings: Record<string, unknown> = existsSync(repoSettingsPath)
+    ? JSON.parse(await readFile(repoSettingsPath, "utf-8"))
     : {};
 
-  // 读取本地 settings
+  // 读取本地 settings.json
   const localSettingsPath = join(agentDir, "settings.json");
   const localSettings: Record<string, unknown> = existsSync(localSettingsPath)
     ? JSON.parse(await readFile(localSettingsPath, "utf-8"))
@@ -99,15 +94,11 @@ export async function getPackageDiff(
   return { added, removed, changed, unchanged };
 }
 
+// ========== 执行 reconciliation ==========
+
 /**
- * 执行 package reconciliation（安装缺失的、更新已声明的）。
- *
- * 不自动卸载本地 package：Pi 的 `packages` 同时承载本扩展和配置仓库
- * 这类 bootstrap package，而同步仓库通常不会声明它们。自动删除会在本扩展
- * 正在运行时把它自身从 settings.json 移除，导致下次启动 `/pisync` 消失。
- *
- * 这个操作依赖 pi CLI，所以在运行时会尝试调用 `pi install`（更新时会先移除同名旧版本）。
- * 如果 pi CLI 不可用，则跳过。
+ * 安装缺失的 packages，更新已声明的 packages。
+ * 不自动卸载本地 package。
  */
 export async function reconcilePackages(
   repoPath: string,
@@ -115,12 +106,11 @@ export async function reconcilePackages(
   config: PiSyncConfig,
 ): Promise<ReconcileResult> {
   const diff = await getPackageDiff(repoPath, agentDir, config);
-  const result: ReconcileResult = { installed: [], removed: [], errors: [] };
+  const result: ReconcileResult = { installed: [], errors: [] };
 
   // 检查 pi CLI 是否可用
   const piAvailable = await isPiCliAvailable();
   if (!piAvailable) {
-    // pi CLI not available — just report what would change
     if (diff.added.length > 0) {
       result.errors.push(
         `pi CLI not available. Run manually: pi install ${diff.added.join(" ")}`,
@@ -129,10 +119,10 @@ export async function reconcilePackages(
     return result;
   }
 
-  // 安装新增的 packages
+  // 安装新增的 packages（使用 argv 数组，防止 shell 注入）
   for (const pkg of diff.added) {
     try {
-      await execAsync(`pi install ${pkg}`, {
+      await execFileAsync("pi", ["install", pkg], {
         env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
         timeout: 120000,
       });
@@ -147,13 +137,12 @@ export async function reconcilePackages(
   // 重新安装变更的 packages
   for (const pkg of diff.changed) {
     try {
-      // Remove old version by removing the package name, then install new
       const pkgName = normalizePackageName(pkg);
-      await execAsync(`pi remove ${pkgName}`, {
+      await execFileAsync("pi", ["remove", pkgName], {
         env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
         timeout: 60000,
-      }).catch(() => {}); // 忽略 remove 失败（可能还没安装）
-      await execAsync(`pi install ${pkg}`, {
+      }).catch(() => {});
+      await execFileAsync("pi", ["install", pkg], {
         env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
         timeout: 120000,
       });
@@ -168,31 +157,25 @@ export async function reconcilePackages(
   return result;
 }
 
-/**
- * 检查 pi CLI 是否可用
- */
+// ========== 辅助 ==========
+
 async function isPiCliAvailable(): Promise<boolean> {
   try {
-    const result = await execAsync("pi --version", { timeout: 10000 });
-    return result.stdout.trim().length > 0;
+    const { stdout } = await execFileAsync("pi", ["--version"], {
+      timeout: 10000,
+    });
+    return stdout.trim().length > 0;
   } catch {
     return false;
   }
 }
 
-/**
- * 标准化 package 名称用于比较
- * 提取 npm: 或 git: 前缀后的实际名称
- */
 function normalizePackageName(pkg: string): string {
-  // npm:@scope/name@1.0.0 → @scope/name
   const npmMatch = pkg.match(/^npm:(.+?)(?:@[\d.].*)?$/);
   if (npmMatch) return npmMatch[1]!;
 
-  // git:github.com/user/repo@v1 → github.com/user/repo
   const gitMatch = pkg.match(/^(?:git:)?(.+?)(?:@.+)?$/);
   if (gitMatch) {
-    // 去掉 URL scheme
     let name = gitMatch[1]!;
     name = name.replace(/^https?:\/\//, "");
     name = name.replace(/^ssh:\/\//, "");

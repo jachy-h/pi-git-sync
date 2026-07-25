@@ -1,9 +1,13 @@
 /**
- * denylist 和 secret scanning
+ * 安全模块：内置 hard deny 和 secret scanning
+ *
+ * 内置 hard deny 优先级最高，用户无法通过 include 覆盖。
+ * Secret scan 在 push 前扫描完整文件和 staged diff。
  */
-import { minimatch } from "./minimatch.ts";
+import { minimatch, BUILTIN_HARD_DENY } from "./glob.ts";
 
-/** 常见的敏感信息模式 */
+// ========== Secret 检测模式 ==========
+
 const SECRET_PATTERNS: Array<{ name: string; pattern: RegExp; requiresContext?: RegExp }> = [
   {
     name: "GitHub Token",
@@ -24,7 +28,6 @@ const SECRET_PATTERNS: Array<{ name: string; pattern: RegExp; requiresContext?: 
   {
     name: "AWS Secret Key",
     pattern: /(?<![A-Za-z0-9\/+=])[A-Za-z0-9\/+=]{40}(?![A-Za-z0-9\/+=])/,
-    // Only flag when the context suggests AWS
     requiresContext: /aws|amazon|secret.?key|secret.?access/i,
   },
   {
@@ -41,13 +44,25 @@ const SECRET_PATTERNS: Array<{ name: string; pattern: RegExp; requiresContext?: 
   },
 ];
 
+// ========== Hard Deny ==========
+
 /**
- * 检查文件路径是否被 denylist 阻止
+ * 检查文件路径是否被内置 hard deny 阻止。
+ * 同时检查用户提供的额外 deny 模式（虽然 schema v2 中用户不可配置 deny，
+ * 但保留参数以兼容可能的未来扩展）。
  */
-export function isDenied(path: string, denyPatterns: string[]): boolean {
+export function isDenied(path: string, extraDenyPatterns: string[] = []): boolean {
   const normalized = path.replace(/\\/g, "/");
 
-  for (const pattern of denyPatterns) {
+  // 内置 hard deny（优先级最高）
+  for (const pattern of BUILTIN_HARD_DENY) {
+    if (minimatch(normalized, pattern)) {
+      return true;
+    }
+  }
+
+  // 额外 deny 模式
+  for (const pattern of extraDenyPatterns) {
     if (minimatch(normalized, pattern)) {
       return true;
     }
@@ -57,8 +72,16 @@ export function isDenied(path: string, denyPatterns: string[]): boolean {
 }
 
 /**
+ * 从路径列表中找出被拒绝的文件
+ */
+export function findDeniedFiles(paths: string[]): string[] {
+  return paths.filter((p) => isDenied(p));
+}
+
+// ========== Secret Scan ==========
+
+/**
  * 扫描内容中的秘密信息
- * @returns 发现的疑似秘密列表
  */
 export function scanSecrets(
   content: string,
@@ -70,13 +93,14 @@ export function scanSecrets(
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     for (const secret of SECRET_PATTERNS) {
-      if (secret.pattern.test(line)) {
-        findings.push({
-          type: secret.name,
-          file: filePath,
-          line: i + 1,
-        });
-      }
+      if (!secret.pattern.test(line)) continue;
+      // 如果有上下文要求，检查整个内容
+      if (secret.requiresContext && !secret.requiresContext.test(content)) continue;
+      findings.push({
+        type: secret.name,
+        file: filePath,
+        line: i + 1,
+      });
     }
   }
 
@@ -86,25 +110,12 @@ export function scanSecrets(
 /**
  * 批量扫描多个文件中的秘密
  */
-export async function scanFilesForSecrets(
+export function scanFilesForSecrets(
   files: Array<{ path: string; content: string }>,
-): Promise<Array<{ type: string; file: string; line?: number }>> {
+): Array<{ type: string; file: string; line?: number }> {
   const results: Array<{ type: string; file: string; line?: number }> = [];
-
   for (const file of files) {
-    const findings = scanSecrets(file.content, file.path);
-    results.push(...findings);
+    results.push(...scanSecrets(file.content, file.path));
   }
-
   return results;
-}
-
-/**
- * 检查是否有敏感文件被加入跟踪
- */
-export function findDeniedFiles(
-  trackedPaths: string[],
-  denyPatterns: string[],
-): string[] {
-  return trackedPaths.filter((path) => isDenied(path, denyPatterns));
 }
