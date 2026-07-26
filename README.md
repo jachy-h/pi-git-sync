@@ -12,15 +12,15 @@ Sync Pi configuration across machines via a GitHub private repository.
 
 pi-git-sync keeps your Pi configuration in a **private Git repository** and syncs it across all your machines. It uses a **three-way comparison** model based on a sync baseline to detect local changes, remote changes, and conflicts.
 
-**v2 highlights (vs v1):**
+Key features:
 
-- Glob-based include/exclude whitelist — no more manual per-file mappings
-- `settings.json` shared as a whole file — simpler, no layered key-merge
+- Glob-based include/exclude whitelist — no manual per-file mappings needed
+- `settings.json` shared as a whole file — simple and predictable
 - Three-way diff with sync baseline — accurate detection of creates, deletes, and bilateral conflicts
 - Full push chain: `capture → commit → fetch → rebase → push → apply`
 - `push --continue` for resolving rebase conflicts mid-push
-- Config repo is **not** a Pi Package — it\'s a standalone Git repo
-- Everything lives under a single `sync/` directory in the repo
+- Config repo is a standalone Git repo, not a Pi Package
+- All synced content lives under a single `sync/` directory
 
 ---
 
@@ -33,7 +33,7 @@ pi-git-sync keeps your Pi configuration in a **private Git repository** and sync
 
 ### 1. Create an Empty Private Repo on GitHub
 
-Create an empty private repo (e.g. `pi-config`). Do **NOT** check "Initialize with README".
+Create an empty private repo (any name you like). Do **NOT** check "Initialize with README".
 
 ### 2. Install pi-git-sync
 
@@ -46,15 +46,15 @@ pi install npm:@jachy/pi-git-sync
 In Pi, provide your repo URL. pi-git-sync will clone, scaffold the config structure, commit and push automatically.
 
 ```bash
-/pisync init git@github.com:<your-username>/pi-config.git
+/pisync init git@github.com:<your-username>/<your-repo>.git
 ```
 
 Generated repo structure:
 
 ```text
-pi-config/
+<your-repo>/
 ├── .gitignore
-├── pi-sync.json              # Sync configuration (schema v2)
+├── pi-sync.json              # Sync configuration
 └── sync/                     # All synced content lives here
     ├── settings.json          # Shared settings (whole file)
     ├── AGENTS.md              # (optional)
@@ -159,7 +159,7 @@ Also: hidden files (except `.gitignore`) and symlinks are skipped.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `schemaVersion` | `2` | — | Must be `2` (v1 configs need migration) |
+| `schemaVersion` | `2` | — | Config schema version (currently `2`) |
 | `branch` | `string` | `"main"` | Git branch to sync |
 | `root` | `string` | `"sync"` | Root directory inside the repo for synced content |
 | `include` | `string[]` | — | Glob whitelist (relative to `root`). Supports `*`, `**`, `?` |
@@ -169,7 +169,7 @@ Also: hidden files (except `.gitignore`) and symlinks are skipped.
 
 ---
 
-## Sync Model (v2)
+## Sync Model
 
 ### Three-Way Comparison
 
@@ -266,14 +266,14 @@ npm run typecheck  # type check
 
 ```text
 pi-git-sync/
-├── index.ts              # Extension entry point (v2)
+├── index.ts              # Extension entry point
 ├── package.json
 ├── tsconfig.json
 ├── scripts/
 │   └── bootstrap.sh      # Bootstrap script for new machines
 ├── src/
 │   ├── commands.ts        # /pisync command routing + push/pull/init flows
-│   ├── config.ts          # pi-sync.json loading & validation (schema v2)
+│   ├── config.ts          # pi-sync.json loading & validation
 │   ├── git.ts             # Git operations (status, fetch, pull, push, rebase)
 │   ├── inventory.ts       # Three-way file comparison (baseline vs local vs remote)
 │   ├── materialize.ts     # Apply repo files to agent (atomic writes, validation)

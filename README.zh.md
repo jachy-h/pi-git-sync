@@ -12,15 +12,15 @@
 
 pi-git-sync 将你的 Pi 配置保存在一个**私有 Git 仓库**中，并在所有机器之间同步。它使用基于同步基线的**三方比较**模型，精准检测本地变更、远端变更和冲突。
 
-**v2 主要变化（相比 v1）：**
+核心特性：
 
-- 基于 Glob 的 include/exclude 白名单 — 不再需要手动逐文件映射
-- `settings.json` 作为完整文件共享 — 更简单，不再做分层 key-merge
+- 基于 Glob 的 include/exclude 白名单 — 无需手动逐文件映射
+- `settings.json` 作为完整文件共享 — 简单且可预期
 - 基于同步基线的三方 diff — 精准检测创建、删除和双边冲突
 - 完整 push 链：`capture → commit → fetch → rebase → push → apply`
 - `push --continue` 用于推送过程中解决 rebase 冲突
-- 配置仓库**不是** Pi Package — 它是一个独立的 Git 仓库
-- 所有内容统一存放在仓库的 `sync/` 目录下
+- 配置仓库是独立的 Git 仓库，不是 Pi Package
+- 所有同步内容统一存放在 `sync/` 目录下
 
 ---
 
@@ -33,7 +33,7 @@ pi-git-sync 将你的 Pi 配置保存在一个**私有 Git 仓库**中，并在�
 
 ### 1. 在 GitHub 创建空私有仓库
 
-创建一个空的私有仓库（例如 `pi-config`），**不要**勾选 "Initialize with README"。
+创建一个空的私有仓库（任意名称），**不要**勾选 "Initialize with README"。
 
 ### 2. 安装 pi-git-sync
 
@@ -46,15 +46,15 @@ pi install npm:@jachy/pi-git-sync
 在 Pi 中执行，提供你的仓库 URL 即可。pi-git-sync 会自动 clone、生成配置文件结构（scaffold）、提交并推送到远端。
 
 ```bash
-/pisync init git@github.com:<your-username>/pi-config.git
+/pisync init git@github.com:<your-username>/<your-repo>.git
 ```
 
 生成的仓库结构：
 
 ```text
-pi-config/
+<your-repo>/
 ├── .gitignore
-├── pi-sync.json              # 同步配置（schema v2）
+├── pi-sync.json              # 同步配置
 └── sync/                     # 所有同步内容在此
     ├── settings.json          # 共享设置（完整文件）
     ├── AGENTS.md              # （可选）
@@ -159,7 +159,7 @@ pi-config/
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `schemaVersion` | `2` | — | 必须为 `2`（v1 配置需要迁移） |
+| `schemaVersion` | `2` | — | 配置 schema 版本（当前为 `2`） |
 | `branch` | `string` | `"main"` | 同步的 Git 分支 |
 | `root` | `string` | `"sync"` | 仓库中同步内容的根目录 |
 | `include` | `string[]` | — | Glob 白名单（相对于 `root`）。支持 `*`、`**`、`?` |
@@ -169,7 +169,7 @@ pi-config/
 
 ---
 
-## 同步模型（v2）
+## 同步模型
 
 ### 三方比较
 
@@ -266,14 +266,14 @@ npm run typecheck  # 类型检查
 
 ```text
 pi-git-sync/
-├── index.ts              # Extension 入口（v2）
+├── index.ts              # Extension 入口
 ├── package.json
 ├── tsconfig.json
 ├── scripts/
 │   └── bootstrap.sh      # 新机器引导脚本
 ├── src/
 │   ├── commands.ts        # /pisync 命令路由 + push/pull/init 流程
-│   ├── config.ts          # pi-sync.json 加载与校验（schema v2）
+│   ├── config.ts          # pi-sync.json 加载与校验
 │   ├── git.ts             # Git 操作（status、fetch、pull、push、rebase）
 │   ├── inventory.ts       # 三方文件比较（基线 vs 本地 vs 远端）
 │   ├── materialize.ts     # 将仓库文件应用到 agent（原子写入、校验）
