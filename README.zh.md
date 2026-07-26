@@ -8,6 +8,22 @@
 
 ---
 
+## 工作原理
+
+pi-git-sync 将你的 Pi 配置保存在一个**私有 Git 仓库**中，并在所有机器之间同步。它使用基于同步基线的**三方比较**模型，精准检测本地变更、远端变更和冲突。
+
+**v2 主要变化（相比 v1）：**
+
+- 基于 Glob 的 include/exclude 白名单 — 不再需要手动逐文件映射
+- `settings.json` 作为完整文件共享 — 更简单，不再做分层 key-merge
+- 基于同步基线的三方 diff — 精准检测创建、删除和双边冲突
+- 完整 push 链：`capture → commit → fetch → rebase → push → apply`
+- `push --continue` 用于推送过程中解决 rebase 冲突
+- 配置仓库**不是** Pi Package — 它是一个独立的 Git 仓库
+- 所有内容统一存放在仓库的 `sync/` 目录下
+
+---
+
 ## 使用方式
 
 ### 前置条件
@@ -17,7 +33,7 @@
 
 ### 1. 在 GitHub 创建空私有仓库
 
-创建一个空的私有仓库（例如 `pi-config`），**不要** 勾选 "Initialize with README"。
+创建一个空的私有仓库（例如 `pi-config`），**不要**勾选 "Initialize with README"。
 
 ### 2. 安装 pi-git-sync
 
@@ -38,16 +54,17 @@ pi install npm:@jachy/pi-git-sync
 ```text
 pi-config/
 ├── .gitignore
-├── package.json              # Pi Package 清单
-├── pi-sync.json              # 同步配置
-├── extensions/               # 自定义扩展
-├── skills/                   # 技能
-├── prompts/                  # 提示模板
-├── themes/                   # 主题
-├── config/
-│   ├── settings.shared.json  # 共享设置
-│   └── machines/             # 单机覆盖（可选）
-└── files/
+├── pi-sync.json              # 同步配置（schema v2）
+└── sync/                     # 所有同步内容在此
+    ├── settings.json          # 共享设置（完整文件）
+    ├── AGENTS.md              # （可选）
+    ├── SYSTEM.md              # （可选）
+    ├── APPEND_SYSTEM.md       # （可选）
+    ├── keybindings.json       # （可选）
+    ├── extensions/            # 自定义扩展
+    ├── skills/                # 技能
+    ├── prompts/               # 提示模板
+    └── themes/                # 主题
 ```
 
 ### 4. 导入当前配置
@@ -64,20 +81,23 @@ pi-config/
 /pisync push
 ```
 
+`push` 命令会将 capture → commit → fetch → rebase → push → apply 合并为一步执行，在展示 diff 后需要确认。
+
 ---
 
 ## 命令
 
 | 命令 | 说明 |
-|---|---|
+| --- | --- |
 | `/pisync` | TUI 交互菜单 |
-| `/pisync status` | 查看同步状态 |
-| `/pisync diff` | 查看待应用的差异 |
-| `/pisync pull` | 拉取并应用远端更新 |
-| `/pisync push` | 提交并推送本地变更 |
-| `/pisync apply` | 应用当前仓库版本（离线） |
-| `/pisync capture` | 将本地配置导入仓库 |
-| `/pisync doctor` | 诊断环境 |
+| `/pisync init [url]` | 初始化或克隆配置仓库（`--force` 强制重建） |
+| `/pisync status` | 显示详细同步状态（三方比较 + Git 信息） |
+| `/pisync diff` | 显示 agent 与仓库之间的待处理变更 |
+| `/pisync pull` | 拉取远端变更并应用到 agent |
+| `/pisync push` | 捕获、提交并推送本地变更 |
+| `/pisync push --continue` | 解决 rebase 冲突后继续推送 |
+| `/pisync capture` | 将本地配置变更导入仓库（不提交也不推送） |
+| `/pisync doctor` | 运行诊断检查 |
 | `/pisync rollback` | 回滚到上一个备份 |
 
 ---
@@ -85,58 +105,133 @@ pi-config/
 ## 同步范围
 
 | 内容 | 同步方式 |
-|---|---|
-| Extensions | Pi 直接从仓库加载 |
-| Skills | Pi 直接从仓库加载 |
-| Prompts | Pi 直接从仓库加载 |
-| Themes | Pi 直接从仓库加载 |
-| 共享 Settings | 分层合并（shared → platform → machine） |
-| `AGENTS.md`、`SYSTEM.md` | 原子复制到 agent 目录 |
-| `keybindings.json` | 原子复制到 agent 目录 |
-| 第三方 Packages | 声明依赖，自动安装/更新（不会自动卸载本地 package） |
+| --- | --- |
+| Extensions | 从 `sync/extensions/` 复制到 agent 目录 |
+| Skills | 从 `sync/skills/` 复制到 agent 目录 |
+| Prompts | 从 `sync/prompts/` 复制到 agent 目录 |
+| Themes | 从 `sync/themes/` 复制到 agent 目录 |
+| `settings.json` | 整文件复制（不做 key 级别合并） |
+| `AGENTS.md`、`SYSTEM.md`、`APPEND_SYSTEM.md` | 复制到 agent 目录 |
+| `keybindings.json` | 复制到 agent 目录 |
+| 第三方 Packages | 在 `sync/settings.json` → `packages[]` 中声明，apply 时自动安装（不会自动卸载本地 package） |
 
 ## 不同步的内容
 
-`auth.json`、`sessions/`、`trust.json`、`models-store.json`、`npm/`、`git/`、`node_modules/`、`.env`、`*.pem`、`id_rsa` 等包含认证信息或可重建的安装产物。
+内置 hard deny 列表（不可配置）：
+
+`auth.json`、`sessions/**`、`trust.json`、`models-store.json`、`npm/**`、`git/**`、`node_modules/**`、`.pi-sync/**`、`**/.env`、`**/*.pem`、`**/id_rsa`、`**/id_ed25519`
+
+此外，隐藏文件（`.gitignore` 除外）和符号链接也会被跳过。
+
+---
 
 ## 配置说明（`pi-sync.json`）
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "branch": "main",
-  "settings": {
-    "source": "config/settings.shared.json",
-    "strategy": "managed-keys",
-    "preserve": ["lastChangelogVersion", "trackingId", "httpProxy"]
-  },
-  "files": [
-    { "source": "files/AGENTS.md", "target": "AGENTS.md" },
-    { "source": "files/SYSTEM.md", "target": "SYSTEM.md", "optional": true },
-    { "source": "files/keybindings.json", "target": "keybindings.json", "optional": true }
+  "root": "sync",
+  "include": [
+    "settings.json",
+    "AGENTS.md",
+    "SYSTEM.md",
+    "APPEND_SYSTEM.md",
+    "keybindings.json",
+    "extensions/**",
+    "skills/**",
+    "prompts/**",
+    "themes/**"
   ],
+  "exclude": [
+    "**/.DS_Store",
+    "**/*.tmp",
+    "**/*.log"
+  ],
+  "delete": "tracked",
   "security": {
-    "deny": ["auth.json", "trust.json", "sessions/**", "**/.env"],
     "scanSecretsBeforePush": true
   }
 }
 ```
 
-## Settings 合并模型
+### 字段说明
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `schemaVersion` | `2` | — | 必须为 `2`（v1 配置需要迁移） |
+| `branch` | `string` | `"main"` | 同步的 Git 分支 |
+| `root` | `string` | `"sync"` | 仓库中同步内容的根目录 |
+| `include` | `string[]` | — | Glob 白名单（相对于 `root`）。支持 `*`、`**`、`?` |
+| `exclude` | `string[]` | `[]` | Glob 排除列表（优先级低于内置 hard deny） |
+| `delete` | `"tracked"` \| `"none"` | `"tracked"` | `"tracked"`：仓库删除时同步删除 agent 文件。`"none"`：永不删除 |
+| `security.scanSecretsBeforePush` | `boolean` | `true` | 推送前扫描敏感信息（API Key、Token、私钥等） |
+
+---
+
+## 同步模型（v2）
+
+### 三方比较
+
+每次同步操作比较三个状态：
 
 ```
-settings.shared.json  →  settings.<platform>.json  →  machines/<hostname>.json  →  本机保留字段
+B = 基线（上次同步的 commit 哈希）— 存储在 .pi-sync/state.json
+L = 本地（当前 agent 文件）
+R = 远端（当前仓库 sync/ 文件）
 ```
 
-优先级：`shared < platform < machine < local-only`
+这样可以精准检测：
+
+| 场景 | 分类 | 操作 |
+| --- | --- | --- |
+| 只有你修改了文件 | `local_only` | push 时捕获 |
+| 只有远端修改了文件 | `remote_only` | pull 时应用 |
+| 双方对同一文件做了不同修改 | `both_modified` | **阻止** — 手动解决冲突 |
+| 你创建了新文件 | `local_created` | push 时捕获 |
+| 远端创建了新文件 | `remote_created` | pull 时应用 |
+| 你删除了已管理的文件 | `local_deleted` | push 时捕获 |
+| 远端删除了已管理的文件 | `remote_deleted` | pull 时应用（若 `delete: "tracked"`） |
+| 双方做了相同的修改 | `converged` | 更新基线，无冲突 |
+
+### Push 流程
+
+```
+capture（agent → 仓库工作树）
+  → commit
+  → fetch origin
+  → rebase 到 origin/main
+  → push
+  → apply（新 HEAD → agent）
+```
+
+如果 rebase 发生冲突，push 会暂停。使用标准 Git 工具解决冲突后：
+
+```bash
+/pisync push --continue
+```
+
+### Pull 流程
+
+```
+fetch origin
+  → 检查是否有未捕获的本地变更（如有则阻止）
+  → 仅 fast-forward（分叉时阻止）
+  → apply（新 HEAD → agent）
+```
+
+---
 
 ## 安全措施
 
-- Pull 默认仅 fast-forward，分叉时停止并提示
-- Push 前自动扫描秘密信息（API Key、Token、私钥等）
-- 所有配置写入为原子操作（临时文件 → fsync → rename）
-- 每次应用前自动创建备份，支持回滚
-- 并发锁防止多个 Pi 实例同时同步
+- Pull 默认**仅 fast-forward**，分叉时停止
+- **双边冲突检测** — 从不会静默覆盖双方修改
+- Push 前自动**扫描敏感信息**（API Key、Token、私钥等）
+- **原子配置写入**（临时文件 → rename）
+- 每次 apply 前自动**备份**，支持**回滚**
+- **并发锁**防止多个 Pi 实例同时同步
+- **内置 hard deny 列表**防止同步凭证（用户不可覆盖）
+- Settings.json **可移植性校验** — 对绝对路径和机器专属内容发出警告
 
 ---
 
@@ -171,26 +266,28 @@ npm run typecheck  # 类型检查
 
 ```text
 pi-git-sync/
-├── index.ts              # Extension 入口
+├── index.ts              # Extension 入口（v2）
 ├── package.json
 ├── tsconfig.json
 ├── scripts/
 │   └── bootstrap.sh      # 新机器引导脚本
 ├── src/
-│   ├── commands.ts        # /pisync 命令路由
-│   ├── config.ts          # pi-sync.json 解析
-│   ├── git.ts             # Git 操作
-│   ├── settings.ts        # Settings 分层合并
-│   ├── materialize.ts     # 原子文件应用
-│   ├── capture.ts         # 本地配置导入仓库
-│   ├── backup.ts          # 备份 & 回滚
-│   ├── lock.ts            # 并发锁
-│   ├── security.ts        # Denylist & 秘密扫描
-│   ├── doctor.ts          # 环境诊断
-│   ├── state.ts           # 状态持久化
-│   ├── packages.ts        # Package reconciliation
-│   ├── ui.ts              # 格式化输出
-│   └── minimatch.ts       # Glob 匹配
+│   ├── commands.ts        # /pisync 命令路由 + push/pull/init 流程
+│   ├── config.ts          # pi-sync.json 加载与校验（schema v2）
+│   ├── git.ts             # Git 操作（status、fetch、pull、push、rebase）
+│   ├── inventory.ts       # 三方文件比较（基线 vs 本地 vs 远端）
+│   ├── materialize.ts     # 将仓库文件应用到 agent（原子写入、校验）
+│   ├── capture.ts         # 将 agent 变更导入仓库工作树
+│   ├── backup.ts          # 备份与回滚
+│   ├── lock.ts            # 并发锁（基于 pid，可检测过期）
+│   ├── security.ts        # 内置 hard deny 列表与敏感信息扫描
+│   ├── doctor.ts          # 环境诊断（git、ssh、可移植性）
+│   ├── validate.ts        # 文件内容校验（JSON、冲突标记、可移植性）
+│   ├── state.ts           # 同步状态持久化（基线）
+│   ├── packages.ts        # Package reconciliation（settings.json packages[]）
+│   ├── settings.ts        # 工具函数（deepMerge、deepEqual — 遗留）
+│   ├── glob.ts            # 自定义 minimatch glob + hard deny + 路径过滤
+│   └── ui.ts              # 输出格式化
 └── test/
     ├── config.test.ts
     ├── git.test.ts
