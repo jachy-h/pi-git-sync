@@ -2,10 +2,39 @@
   "name": "@jachy/pi-git-sync",
   "version": "0.1.12",
   "description": "Sync Pi configuration across machines via GitHub Private Repository",
+  "license": "MIT",
+  "author": {
+    "name": "jachy-h"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jachy-h/pi-git-sync.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jachy-h/pi-git-sync/issues"
+  },
+  "homepage": "https://github.com/jachy-h/pi-git-sync#readme",
+  "type": "module",
+  "main": "./index.ts",
+  "files": [
+    "index.ts",
+    "src/",
+    "scripts/",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "keywords": [
     "pi-package",
     "pi-extension",
-    "git-sync"
+    "git-sync",
+    "pi",
+    "sync",
+    "config",
+    "dotfiles"
   ],
   "pi": {
     "extensions": [
