@@ -41,6 +41,31 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setStatus("pi-sync", undefined);
   });
 
+  pi.registerCommand("debug:clear-repo", {
+    description: "[DEBUG] Clear local and remote sync repo contents — for testing only",
+    async handler(args, ctx) {
+      const confirmed = await ctx.ui.confirm(
+        "⚠ DEBUG: Clear Sync Repo",
+        "This will DELETE ALL contents from both local and remote sync repos.\nThis action cannot be undone. Continue?",
+      );
+      if (!confirmed) {
+        ctx.ui.notify("Cancelled.", "warning");
+        return;
+      }
+
+      ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Clearing repo..."));
+      const result = await cmds.clearRepo();
+      ctx.ui.setStatus("pi-sync", undefined);
+
+      ctx.ui.notify(
+        result.message,
+        result.message.includes("successfully") ? "info" : "error",
+      );
+
+      if (result.reload) await ctx.reload();
+    },
+  });
+
   pi.registerCommand("pisync", {
     description: "Sync Pi configuration via Git repository (init|status|diff|pull|push|capture|doctor|rollback)",
     async handler(args, ctx) {
@@ -49,9 +74,13 @@ export default function (pi: ExtensionAPI) {
       const subArgs = parts.slice(1).join(" ");
 
       switch (subCommand) {
-        case "init":
-          await handleInit(cmds, subArgs || undefined, ctx);
+        case "init": {
+          const initArgs = parts.slice(1);
+          const force = initArgs.includes("--force");
+          const initUrl = initArgs.filter((a) => a !== "--force").join(" ").trim();
+          await handleInit(cmds, initUrl || undefined, ctx, force);
           break;
+        }
         case "status":
           await handleStatus(cmds, ctx);
           break;
@@ -297,7 +326,7 @@ async function executeMenuChoice(
     case "diff": await handleDiff(cmds, ctx); return;
     case "pull": await handlePull(cmds, ctx); return;
     case "push": await handlePush(cmds, undefined, ctx); return;
-    case "init": await handleInit(cmds, undefined, ctx); return;
+    case "init": await handleInit(cmds, undefined, ctx, false); return;
     case "capture": await handleCapture(cmds, ctx); return;
     case "doctor": await handleDoctor(cmds, ctx); return;
     case "rollback": await handleRollback(cmds, ctx); return;
@@ -310,13 +339,16 @@ async function handleInit(
   cmds: PiSyncCommands,
   gitUrl: string | undefined,
   ctx: ExtensionCommandContext,
+  force = false,
 ): Promise<void> {
   let url = gitUrl;
 
   if (!url) {
-    ctx.ui.setWorkingMessage("Checking pi-sync status...");
-    const result = await cmds.init();
-    ctx.ui.setWorkingMessage();
+    ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Checking pi-sync status..."));
+    const result = await cmds.init(undefined, (msg) => {
+      ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", msg));
+    }, force);
+    ctx.ui.setStatus("pi-sync", undefined);
 
     if (!result.message.includes("Enter your config repo Git URL")) {
       notifyInitResult(result, ctx);
@@ -335,9 +367,11 @@ async function handleInit(
     }
   }
 
-  ctx.ui.setWorkingMessage("Initializing pi-sync...");
-  const initResult = await cmds.init(url);
-  ctx.ui.setWorkingMessage();
+  ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Initializing..."));
+  const initResult = await cmds.init(url, (msg) => {
+    ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", msg));
+  }, force);
+  ctx.ui.setStatus("pi-sync", undefined);
 
   notifyInitResult(initResult, ctx);
 
@@ -355,17 +389,30 @@ function notifyInitResult(
 
 async function handleStatus(cmds: PiSyncCommands, ctx: ExtensionCommandContext): Promise<void> {
   const output = await cmds.status();
-  ctx.ui.notify(output, "info");
+  await showOutput(ctx, output);
 }
 
 async function handleDiff(cmds: PiSyncCommands, ctx: ExtensionCommandContext): Promise<void> {
   const output = await cmds.diff();
-  ctx.ui.notify(output, "info");
+  await showOutput(ctx, output);
 }
 
 async function handleDoctor(cmds: PiSyncCommands, ctx: ExtensionCommandContext): Promise<void> {
   const output = await cmds.doctor();
-  ctx.ui.notify(output, "info");
+  await showOutput(ctx, output);
+}
+
+// ========== 通用纯文本输出（text 颜色） ==========
+
+async function showOutput(ctx: ExtensionCommandContext, text: string): Promise<void> {
+  await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+    const lines = text.split("\n");
+    return {
+      render: (_w: number) => lines.map((l) => theme.fg("text", l)),
+      invalidate: () => {},
+      handleInput: () => done(),
+    };
+  });
 }
 
 // ========== push：两步交互（diff 确认 → 实际执行） ==========
@@ -377,9 +424,9 @@ async function handlePush(
 ): Promise<void> {
   // push --continue：直接继续冲突解决
   if (subArgs === "--continue") {
-    ctx.ui.setWorkingMessage("Continuing push...");
+    ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Continuing push..."));
     const result = await cmds.push(undefined, undefined, "--continue");
-    ctx.ui.setWorkingMessage();
+    ctx.ui.setStatus("pi-sync", undefined);
     const classified = classifyResult(result.message, "Push");
     notifyResult(classified, ctx);
     if (result.reload) await ctx.reload();
@@ -387,11 +434,11 @@ async function handlePush(
   }
 
   // 第一步：capture + diff
-  ctx.ui.setWorkingMessage("Checking changes...");
+  ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Checking changes..."));
 
   // 先 capture 看看有什么变化
   const captureOutput = await cmds.capture();
-  ctx.ui.setWorkingMessage();
+  ctx.ui.setStatus("pi-sync", undefined);
 
   if (captureOutput.includes("blocked") || captureOutput.includes("No changes")) {
     // 被阻止或无变更，直接展示
@@ -408,9 +455,9 @@ async function handlePush(
   ctx.ui.notify(captureOutput, "info");
 
   // 展示 diff
-  ctx.ui.setWorkingMessage("Generating diff...");
+  ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Generating diff..."));
   const diffOutput = await cmds.diff();
-  ctx.ui.setWorkingMessage();
+  ctx.ui.setStatus("pi-sync", undefined);
 
   // 提取 Git diff 部分展示（如果有）
   ctx.ui.notify(diffOutput, "info");
@@ -427,9 +474,9 @@ async function handlePush(
   }
 
   // 第二步：执行实际 push
-  ctx.ui.setWorkingMessage("Pushing...");
+  ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Pushing..."));
   const result = await cmds.push(undefined, subArgs);
-  ctx.ui.setWorkingMessage();
+  ctx.ui.setStatus("pi-sync", undefined);
 
   const classified = classifyResult(result.message, "Push");
   notifyResult(classified, ctx);
@@ -442,9 +489,9 @@ async function handlePush(
 // ========== capture ==========
 
 async function handleCapture(cmds: PiSyncCommands, ctx: ExtensionCommandContext): Promise<void> {
-  ctx.ui.setWorkingMessage("Capturing...");
+  ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Capturing..."));
   const output = await cmds.capture();
-  ctx.ui.setWorkingMessage();
+  ctx.ui.setStatus("pi-sync", undefined);
 
   const result = classifyResult(output, "Capture");
   notifyResult(result, ctx);
@@ -453,9 +500,9 @@ async function handleCapture(cmds: PiSyncCommands, ctx: ExtensionCommandContext)
 // ========== pull ==========
 
 async function handlePull(cmds: PiSyncCommands, ctx: ExtensionCommandContext): Promise<void> {
-  ctx.ui.setWorkingMessage("Checking remote...");
+  ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Checking remote..."));
   const result = await cmds.pull();
-  ctx.ui.setWorkingMessage();
+  ctx.ui.setStatus("pi-sync", undefined);
 
   if (result.message.includes("Already up to date") || result.message.includes("No changes")) {
     ctx.ui.notify(result.message, "warning");

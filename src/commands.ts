@@ -496,7 +496,11 @@ export class PiSyncCommands {
 
   // ========== init (统一入口) ==========
 
-  async init(gitUrl?: string): Promise<{
+  async init(
+    gitUrl?: string,
+    onProgress?: (message: string) => void,
+    force = false,
+  ): Promise<{
     message: string;
     needsReload: boolean;
     ok: boolean;
@@ -504,9 +508,9 @@ export class PiSyncCommands {
   }> {
     const defaultPath = join(this.agentDir, "..", "config-repo");
 
-    // 已初始化：直接 apply
-    if (await this.isAlreadyInitialized(defaultPath)) {
-      return this.initAlreadyInitialized(defaultPath);
+    // 已初始化：直接 apply（force 时跳过，走 fresh 流程）
+    if (!force && await this.isAlreadyInitialized(defaultPath)) {
+      return this.initAlreadyInitialized(defaultPath, onProgress);
     }
 
     // 未初始化 — 需要 gitUrl
@@ -533,10 +537,13 @@ export class PiSyncCommands {
       };
     }
 
-    return this.initFresh(gitUrl, defaultPath);
+    return this.initFresh(gitUrl, defaultPath, onProgress, force);
   }
 
-  private async initAlreadyInitialized(defaultPath: string): Promise<{
+  private async initAlreadyInitialized(
+    defaultPath: string,
+    onProgress?: (message: string) => void,
+  ): Promise<{
     message: string;
     needsReload: boolean;
     ok: boolean;
@@ -549,14 +556,17 @@ export class PiSyncCommands {
 
     try {
       // Fetch latest
+      onProgress?.("Fetching latest changes...");
       try {
         await gitFetch(defaultPath);
         const status = await gitStatus(defaultPath);
         if (status.behind > 0) {
+          onProgress?.("Pulling remote changes...");
           await gitPull(defaultPath, status.branch);
         }
       } catch { /* offline */ }
 
+      onProgress?.("Applying config to agent...");
       const config = await loadPiSyncConfig(defaultPath);
       const state = await loadState(this.agentDir);
       const applyResult = await this.applyCurrent(defaultPath, config, state, "init");
@@ -572,7 +582,12 @@ export class PiSyncCommands {
     }
   }
 
-  private async initFresh(gitUrl: string, defaultPath: string): Promise<{
+  private async initFresh(
+    gitUrl: string,
+    defaultPath: string,
+    onProgress?: (message: string) => void,
+    force = false,
+  ): Promise<{
     message: string;
     needsReload: boolean;
     ok: boolean;
@@ -586,26 +601,42 @@ export class PiSyncCommands {
     try {
       const lines: string[] = [];
 
-      if (existsSync(defaultPath) && existsSync(join(defaultPath, ".git"))) {
-        // 仓库已存在，验证 origin
-        const existingResult = await gitExec(defaultPath, ["remote", "get-url", "origin"]);
-        const existingUrl = existingResult.stdout.trim();
+      onProgress?.("Checking local repo...");
 
-        if (!urlsMatch(existingUrl, gitUrl)) {
-          return {
-            message: `A config repo already exists at ${defaultPath}\n` +
-              `Existing remote: ${existingUrl}\nProvided URL:   ${gitUrl}\n` +
-              "To switch, remove the existing repo first: rm -rf ~/.pi/config-repo",
-            needsReload: false, ok: false, level: "error",
-          };
+      if (existsSync(defaultPath) && existsSync(join(defaultPath, ".git"))) {
+        if (force) {
+          // --force: remove existing repo and re-clone
+          onProgress?.("Removing existing repo (--force)...");
+          lines.push("Force flag set — removing existing repo and re-cloning...");
+          const { rm } = await import("node:fs/promises");
+          await rm(defaultPath, { recursive: true, force: true });
+          // Continue to clone below
+        } else {
+          // 仓库已存在，验证 origin
+          const existingResult = await gitExec(defaultPath, ["remote", "get-url", "origin"]);
+          const existingUrl = existingResult.stdout.trim();
+
+          if (!urlsMatch(existingUrl, gitUrl)) {
+            return {
+              message: `A config repo already exists at ${defaultPath}\n` +
+                `Existing remote: ${existingUrl}\nProvided URL:   ${gitUrl}\n` +
+                "To switch, remove the existing repo first: rm -rf ~/.pi/config-repo\n" +
+                "Or use: /pisync init --force <git-url>",
+              needsReload: false, ok: false, level: "error",
+            };
+          }
+          lines.push(`Config repo already exists at ${defaultPath}`);
         }
-        lines.push(`Config repo already exists at ${defaultPath}`);
-      } else {
-        // Clone
+      }
+
+      // Clone if no existing repo (or after force-removal above)
+      if (!existsSync(defaultPath) || !existsSync(join(defaultPath, ".git"))) {
+        onProgress?.(`Cloning ${gitUrl}...`);
         lines.push(`Cloning ${gitUrl}...`);
         await mkdir(join(defaultPath, ".."), { recursive: true });
 
         // Preflight
+        onProgress?.("Checking remote connectivity...");
         const preflight = await gitExec(
           process.cwd(),
           ["ls-remote", "--", gitUrl],
@@ -641,20 +672,41 @@ export class PiSyncCommands {
       }
 
       // Fetch latest
+      onProgress?.("Fetching latest changes...");
       await gitFetch(defaultPath).catch(() => {});
 
       // 检测仓库状态
+      onProgress?.("Analyzing repo state...");
       const repoState = await detectRepoState(defaultPath);
 
-      if (repoState === "empty") {
+      if (force || repoState === "empty") {
         // Scaffold schema v2
-        lines.push("Empty repository — scaffolding config structure (schema v2)...");
+        // force: always scaffold regardless of repo state — skip the "invalid" error below
+        if (force && repoState !== "empty") {
+          onProgress?.("Clearing existing repo contents (--force)...");
+          lines.push("Force flag set — clearing existing repo contents...");
+          await clearRepoContents(defaultPath);
+          await gitExec(defaultPath, ["add", "-A"]);
+          await gitExec(defaultPath, ["commit", "-m", "pi-sync: force clear before rebuild", "--allow-empty"]);
+        }
+
+        onProgress?.("Scaffolding config structure...");
+        lines.push(`${force && repoState !== "empty" ? "Force rebuilding" : "Empty repository"} — scaffolding config structure (schema v2)...`);
         await scaffoldConfigRepoV2(defaultPath);
+        onProgress?.("Committing scaffold...");
         await gitCommit(defaultPath, "pi-sync: initial config scaffold (v2)");
 
+        onProgress?.("Pushing to remote...");
         await gitRenameBranch(defaultPath, "main");
         try {
-          await gitPush(defaultPath, "main");
+          const pushArgs = force
+            ? ["push", "--force", "origin", "main"]
+            : ["push", "origin", "main"];
+          if (force) {
+            await gitExec(defaultPath, pushArgs);
+          } else {
+            await gitPush(defaultPath, "main");
+          }
           lines.push("Scaffold committed and pushed to origin/main.");
         } catch (err) {
           await updateState(this.agentDir, { repoPath: defaultPath });
@@ -672,11 +724,13 @@ export class PiSyncCommands {
         return {
           message: `The repository at ${gitUrl} has commits but is not a valid pi-sync config repo.\n` +
             "A pi-sync config repo must have a pi-sync.json at its root.\n" +
-            "Either use an empty repository for auto-scaffolding, or ensure the repo contains a valid pi-sync.json file.",
+            "Either use an empty repository for auto-scaffolding, or ensure the repo contains a valid pi-sync.json file.\n\n" +
+            "To force rebuild this repository, use: /pisync init --force <git-url>",
           needsReload: false, ok: false, level: "error",
         };
       } else {
         // Valid sync repo
+        onProgress?.("Fetching latest...");
         lines.push("Valid sync repo detected — fetching latest...");
         const status = await gitStatus(defaultPath);
         const { pulled } = await gitPull(defaultPath, status.branch);
@@ -684,9 +738,11 @@ export class PiSyncCommands {
       }
 
       // 更新 state（但不再 pi install）
+      onProgress?.("Saving state...");
       await updateState(this.agentDir, { repoPath: defaultPath });
 
       // Apply config
+      onProgress?.("Applying config to agent...");
       const config = await loadPiSyncConfig(defaultPath);
       const state = await loadState(this.agentDir);
       const applyResult = await this.applyCurrent(defaultPath, config, state, "init");
@@ -774,6 +830,59 @@ export class PiSyncCommands {
   async rollbackList(): Promise<string> {
     const backups = await listBackups(this.agentDir);
     return formatBackupList(backups);
+  }
+
+  // ========== debug: clear-repo ==========
+
+  async clearRepo(repoPath?: string): Promise<{ message: string; reload: boolean }> {
+    const rp = repoPath ?? (await getRepoPathSafe(this.agentDir));
+    if (!rp) return { message: "No config repo configured.", reload: false };
+
+    const acquired = await this.lock.acquire("clear-repo", 5000);
+    if (!acquired) {
+      return { message: "Another sync operation is in progress.", reload: false };
+    }
+
+    try {
+      const lines: string[] = [];
+      const status = await gitStatus(rp);
+
+      // 1. 清空本地仓库内容（保留 .git）
+      lines.push("Clearing local repo contents...");
+      await clearRepoContents(rp);
+
+      // 2. 提交清空操作
+      lines.push("Committing clear...");
+      await gitExec(rp, ["add", "-A"]);
+      await gitExec(rp, ["commit", "-m", "debug: clear repo", "--allow-empty"]);
+
+      // 3. 强制推送到远端以清空远端仓库
+      lines.push("Force pushing to remote...");
+      await gitExec(rp, ["push", "--force", "origin", status.branch]);
+
+      // 4. 清空本地同步状态
+      lines.push("Clearing local sync state...");
+      await saveState(this.agentDir, {
+        schemaVersion: 2,
+        repoPath: "",
+        branch: "main",
+        lastSyncedCommit: null,
+        lastSyncedAt: null,
+        files: {},
+        pendingOperation: null,
+        lastBackup: null,
+      });
+
+      lines.push("Repo cleared successfully (local + remote).");
+      return { message: lines.join("\n"), reload: true };
+    } catch (err) {
+      return {
+        message: `Clear repo failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+        reload: false,
+      };
+    } finally {
+      await this.lock.release();
+    }
   }
 
   // ========== Private: applyCurrent ==========
@@ -1040,4 +1149,32 @@ function urlsMatch(a: string, b: string): boolean {
       .replace(/:\d+\//, "/")
       .toLowerCase();
   return normalize(a) === normalize(b);
+}
+
+/**
+ * 清空仓库工作目录中的所有文件（保留 .git 目录）
+ */
+async function clearRepoContents(repoPath: string): Promise<void> {
+  const { readdir: rd, rm } = await import("node:fs/promises");
+
+  async function walk(dir: string): Promise<void> {
+    if (!existsSync(dir)) return;
+    let entries;
+    try {
+      entries = await rd(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === ".git") continue;
+      const fullPath = join(dir, entry.name);
+      try {
+        await rm(fullPath, { recursive: true, force: true });
+      } catch {
+        // 忽略删除失败
+      }
+    }
+  }
+
+  await walk(repoPath);
 }
