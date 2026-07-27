@@ -444,10 +444,12 @@ export class PiSyncCommands {
 			} catch (error) {
 				return `Capture blocked: ${error instanceof Error ? error.message : "Configured branch check failed."}`;
 			}
+			const status = await gitStatus(rp);
 			const result = await this.captureWithScaffoldCalibration(
 				rp,
 				config,
 				state,
+				this.shouldRefreshLocalCapture(status, state),
 			);
 
 			if (result.hasConflicts) {
@@ -774,6 +776,7 @@ export class PiSyncCommands {
 				rp,
 				config,
 				state,
+				this.shouldRefreshLocalCapture(statusBefore, state),
 			);
 			if (capture.hasConflicts) {
 				try {
@@ -1358,6 +1361,7 @@ export class PiSyncCommands {
 		try {
 			const lines: string[] = [];
 			let capturedInitialLocalConfig = false;
+			let initialCapturedFiles = new Set<string>();
 
 			onProgress?.("Checking local repo...");
 
@@ -1508,6 +1512,7 @@ export class PiSyncCommands {
 						level: "error",
 					};
 				}
+				initialCapturedFiles = new Set(initialCapture.captured);
 				capturedInitialLocalConfig =
 					initialCapture.captured.length > 0 ||
 					initialCapture.deleted.length > 0;
@@ -1584,7 +1589,27 @@ export class PiSyncCommands {
 			// Apply config
 			onProgress?.("Applying config to agent...");
 			const config = await loadPiSyncConfig(defaultPath);
-			const state = await loadState(this.agentDir);
+			let state = await loadState(this.agentDir);
+			if (initialCapturedFiles.size > 0) {
+				// captureChanges sanitizes machine-local package sources before writing
+				// settings.json to the shared repository. Seed only the files captured
+				// from this machine so applyCurrent sees that sanitized copy as the
+				// baseline, rather than treating it as a simultaneous remote edit.
+				// Leave untouched scaffold files unbased so they can still be applied.
+				const repositoryBaseline = await this.createRepositoryBaseline(
+					defaultPath,
+					config,
+					state,
+				);
+				state = {
+					...state,
+					files: Object.fromEntries(
+						Object.entries(repositoryBaseline.files).filter(([relativePath]) =>
+							initialCapturedFiles.has(relativePath),
+						),
+					),
+				};
+			}
 			const applyResult = await this.applyCurrent(
 				defaultPath,
 				config,
@@ -1789,6 +1814,7 @@ export class PiSyncCommands {
 		repoPath: string,
 		config: PiSyncConfig,
 		state: SyncState,
+		preferLocalOnConflicts = false,
 	): Promise<Awaited<ReturnType<typeof captureChanges>>> {
 		const shouldCalibrate =
 			state.lastSyncedCommit === null &&
@@ -1799,7 +1825,26 @@ export class PiSyncCommands {
 			? await this.createRepositoryBaseline(repoPath, config, state)
 			: state;
 
-		return captureChanges(this.agentDir, repoPath, config, captureState);
+		return captureChanges(this.agentDir, repoPath, config, captureState, {
+			preferLocalOnConflicts,
+		});
+	}
+
+	/**
+	 * A dirty worktree on the exact commit recorded by the baseline contains
+	 * local capture staging, not a committed repository-side change. Refresh it
+	 * from the agent so retries cannot turn two snapshots from this device into
+	 * a bilateral conflict. Committed HEAD changes still use strict comparison.
+	 */
+	private shouldRefreshLocalCapture(
+		status: Awaited<ReturnType<typeof gitStatus>>,
+		state: SyncState,
+	): boolean {
+		return (
+			status.hasUncommittedChanges &&
+			state.lastSyncedCommit !== null &&
+			status.commit === state.lastSyncedCommit
+		);
 	}
 
 	private async hasScaffoldSettingsPlaceholder(
@@ -2298,7 +2343,7 @@ async function scaffoldConfigRepoV2(repoPath: string): Promise<void> {
 			"prompts/**",
 			"themes/**",
 		],
-		exclude: ["**/.DS_Store", "**/*.tmp", "**/*.log"],
+		exclude: ["**/.DS_Store", "**/*.tmp", "**/*.log", "extensions/**/logs/**"],
 		delete: "tracked",
 		security: {
 			scanSecretsBeforePush: true,

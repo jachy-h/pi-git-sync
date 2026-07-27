@@ -169,8 +169,14 @@ describe("PiSyncCommands.init (end-to-end with a real git remote)", () => {
 	});
 
 	it("captures local settings while scaffolding an empty remote", async () => {
-		const localSettings = {
+		const sharedSettings = {
 			packages: ["npm:@jachy/pi-git-sync", "npm:pi-lens", "npm:context-mode"],
+		};
+		const localSettings = {
+			packages: [
+				...sharedSettings.packages,
+				"file:/machine-local/dev-extension",
+			],
 		};
 		await writeFile(
 			join(agentDir, "settings.json"),
@@ -197,15 +203,23 @@ describe("PiSyncCommands.init (end-to-end with a real git remote)", () => {
 		expect(result.level).toBe("info");
 		expect(result.needsReload).toBe(true);
 		expect(result.message).toContain("Setup complete");
+		expect(result.message).not.toContain("Sync conflict detected");
 		expect(result.message).not.toMatch(/^Init failed:/);
 
 		// The local clone must actually contain the committed scaffold.
 		expect(existsSync(join(localRepoDir, ".git"))).toBe(true);
 		expect(existsSync(join(localRepoDir, "pi-sync.json"))).toBe(true);
+		const scaffoldConfig = JSON.parse(
+			await readFile(join(localRepoDir, "pi-sync.json"), "utf-8"),
+		) as { exclude: string[] };
+		expect(scaffoldConfig.exclude).toContain("extensions/**/logs/**");
 		expect(
 			JSON.parse(
 				await readFile(join(localRepoDir, "sync/settings.json"), "utf-8"),
 			),
+		).toEqual(sharedSettings);
+		expect(
+			JSON.parse(await readFile(join(agentDir, "settings.json"), "utf-8")),
 		).toEqual(localSettings);
 		expect((await loadState(agentDir)).files["settings.json"]).toBeDefined();
 		// HEAD must exist — i.e. a commit was really created (regression guard).

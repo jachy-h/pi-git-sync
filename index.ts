@@ -551,7 +551,7 @@ async function showOutput(
 	});
 }
 
-// ========== push：两步交互（diff 确认 → 实际执行） ==========
+// ========== push：准备、展示变更并立即执行 ==========
 
 async function handlePush(
 	cmds: PiSyncCommands,
@@ -589,18 +589,6 @@ async function handlePush(
 			preparation.diff,
 		"info",
 	);
-
-	const confirmed = await ctx.ui.confirm(
-		"pi-sync: Confirm push",
-		"Push these changes to the remote repository?",
-	);
-	if (!confirmed) {
-		ctx.ui.notify(
-			"Push cancelled. The captured repository changes were kept for retry.",
-			"warning",
-		);
-		return;
-	}
 
 	ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Pushing..."));
 	const result = await cmds.executePush(preparation);

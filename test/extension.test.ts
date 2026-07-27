@@ -333,7 +333,7 @@ describe("debug:clear-repo command", () => {
 });
 
 describe.sequential("Extension push command interaction flow", () => {
-	it("push flow confirms before executing, cancel does not push", async () => {
+	it("push flow does not request confirmation", async () => {
 		await withTestEnvironment(async (environment) => {
 			const fixture = await createGitFixture(environment.rootDir);
 			await seedConfigRepo(fixture.deviceBPath);
@@ -348,17 +348,16 @@ describe.sequential("Extension push command interaction flow", () => {
 			const api = new FakeExtensionApi();
 			register(api);
 			const ctx = createRpcContext();
-			ctx.ui.confirmResponses = [false];
 
 			const cmd = api.commands.get("pisync")!;
 			await cmd.handler("push", ctx);
 
-			// Should have notified (either cancelled or no changes)
+			expect(ctx.ui.confirmCalls).toHaveLength(0);
 			expect(ctx.ui.notifications.length).toBeGreaterThan(0);
 		});
 	});
 
-	it("push flow shows diff+confirmation then pushes when confirmed", async () => {
+	it("push flow shows the diff and pushes immediately", async () => {
 		await withTestEnvironment(async (environment) => {
 			const fixture = await createGitFixture(environment.rootDir);
 			await seedConfigRepo(fixture.deviceAPath);
@@ -385,12 +384,13 @@ describe.sequential("Extension push command interaction flow", () => {
 			const api = new FakeExtensionApi();
 			register(api);
 			const ctx = createRpcContext();
-			ctx.ui.confirmResponses = [true];
 
 			const cmd = api.commands.get("pisync")!;
 			await cmd.handler("push", ctx);
 
+			expect(ctx.ui.confirmCalls).toHaveLength(0);
 			expect(ctx.ui.notifications.length).toBeGreaterThan(0);
+			expect(ctx.reloadCalls).toBe(1);
 		});
 	});
 

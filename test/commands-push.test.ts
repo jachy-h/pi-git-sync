@@ -177,6 +177,74 @@ describe.sequential("PiSyncCommands.push", () => {
 		});
 	});
 
+	it("refreshes stale local capture staging instead of reporting a bilateral conflict", async () => {
+		await withTestEnvironment(async (environment) => {
+			const fixture = await createGitFixture(environment.rootDir);
+			const baselineCommit = await seedConfigRepo(fixture.deviceBPath);
+			await runGit(fixture.deviceBPath, ["push", "origin", "main"]);
+			await environment.writeAgentFile("prompts/welcome.md", "base\n");
+			await saveState(
+				environment.agentDir,
+				createSyncState({
+					repoPath: fixture.deviceBPath,
+					lastSyncedCommit: baselineCommit,
+					files: {
+						"prompts/welcome.md": {
+							sha256: sha256("base\n"),
+							mode: 0o644,
+						},
+					},
+				}),
+			);
+
+			const commands = new PiSyncCommands(environment.agentDir);
+			await environment.writeAgentFile(
+				"prompts/welcome.md",
+				"first snapshot\n",
+			);
+			const firstPreparation = await commands.preparePush(fixture.deviceBPath);
+			expect(firstPreparation.kind).toBe("ready");
+			expect(
+				await readFile(
+					join(fixture.deviceBPath, "sync/prompts/welcome.md"),
+					"utf-8",
+				),
+			).toBe("first snapshot\n");
+
+			// Simulate a mutable local file changing after a blocked/cancelled prepare.
+			// The dirty repo copy is staging produced by this same device, so retrying
+			// must refresh it rather than creating a conflict branch.
+			await environment.writeAgentFile(
+				"prompts/welcome.md",
+				"second snapshot\n",
+			);
+			const retryPreparation = await commands.preparePush(fixture.deviceBPath);
+			expect(retryPreparation.kind).toBe("ready");
+			expect(retryPreparation.message).not.toContain("Sync conflict detected");
+			expect(
+				await readFile(
+					join(fixture.deviceBPath, "sync/prompts/welcome.md"),
+					"utf-8",
+				),
+			).toBe("second snapshot\n");
+			if (retryPreparation.kind !== "ready") {
+				throw new Error("Expected retry preparation to be ready");
+			}
+
+			const result = await commands.executePush(retryPreparation);
+			expect(result).toMatchObject({
+				ok: true,
+				message: expect.stringContaining("Pushed successfully"),
+			});
+			expect(
+				await runGit(fixture.deviceBPath, [
+					"show",
+					"origin/main:sync/prompts/welcome.md",
+				]),
+			).toMatchObject({ stdout: "second snapshot" });
+		});
+	});
+
 	it("detects bilateral conflicts and blocks the push without modifying remote", async () => {
 		await withTestEnvironment(async (environment) => {
 			const fixture = await createGitFixture(environment.rootDir);
