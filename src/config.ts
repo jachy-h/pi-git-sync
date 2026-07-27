@@ -90,38 +90,51 @@ export function validateConfig(raw: Record<string, unknown>): PiSyncConfig {
     );
   }
 
+  const isUnsafeRelativePath = (value: string): boolean =>
+    value.includes("\0") ||
+    value.startsWith("/") ||
+    value.startsWith("\\") ||
+    /^[A-Za-z]:/.test(value) ||
+    value.split(/[\\/]/).includes("..");
+
+  // branch
+  const branch = raw.branch ?? "main";
+  if (
+    typeof branch !== "string" ||
+    branch.trim() === "" ||
+    branch !== branch.trim() ||
+    branch.startsWith("-") ||
+    /[\0-\x1f\x7f]/.test(branch)
+  ) {
+    throw new Error("pi-sync.json: branch must be a valid, non-empty Git branch name.");
+  }
+
   // root
-  const root = typeof raw.root === "string" ? raw.root : "sync";
-  if (root.includes("..") || root === "/" || root === "") {
+  const root = raw.root ?? "sync";
+  if (typeof root !== "string" || root === "" || isUnsafeRelativePath(root)) {
     throw new Error("pi-sync.json: root must be a relative path and must not contain '..'.");
   }
+
+  const validatePattern = (pattern: unknown, field: "include" | "exclude"): string => {
+    if (typeof pattern !== "string" || pattern === "" || isUnsafeRelativePath(pattern)) {
+      throw new Error(`pi-sync.json: invalid ${field} pattern "${String(pattern)}". Patterns must be relative and must not contain "..".`);
+    }
+    return pattern;
+  };
 
   // include
   const include = raw.include;
   if (!Array.isArray(include) || include.length === 0) {
     throw new Error("pi-sync.json: include must be a non-empty array of glob patterns.");
   }
-  for (const pattern of include) {
-    if (typeof pattern !== "string") {
-      throw new Error("pi-sync.json: each include entry must be a string.");
-    }
-    if (pattern.includes("..") || pattern.startsWith("/")) {
-      throw new Error(`pi-sync.json: invalid include pattern "${pattern}". Patterns must be relative and must not contain "..".`);
-    }
-  }
+  const validatedInclude = include.map((pattern) => validatePattern(pattern, "include"));
 
   // exclude
   const exclude = raw.exclude;
-  if (exclude !== undefined) {
-    if (!Array.isArray(exclude)) {
-      throw new Error("pi-sync.json: exclude must be an array of glob patterns.");
-    }
-    for (const pattern of exclude as string[]) {
-      if (typeof pattern !== "string") {
-        throw new Error("pi-sync.json: each exclude entry must be a string.");
-      }
-    }
+  if (exclude !== undefined && !Array.isArray(exclude)) {
+    throw new Error("pi-sync.json: exclude must be an array of glob patterns.");
   }
+  const validatedExclude = (exclude ?? []).map((pattern) => validatePattern(pattern, "exclude"));
 
   // delete
   const del = raw.delete;
@@ -130,18 +143,24 @@ export function validateConfig(raw: Record<string, unknown>): PiSyncConfig {
   }
 
   // security
-  const security = raw.security as Record<string, unknown> | undefined;
+  const security = raw.security;
+  if (security !== undefined && (typeof security !== "object" || security === null || Array.isArray(security))) {
+    throw new Error("pi-sync.json: security must be an object.");
+  }
+  const scanSecretsBeforePush = (security as Record<string, unknown> | undefined)?.scanSecretsBeforePush;
+  if (scanSecretsBeforePush !== undefined && typeof scanSecretsBeforePush !== "boolean") {
+    throw new Error("pi-sync.json: security.scanSecretsBeforePush must be a boolean.");
+  }
 
   return {
     schemaVersion: 2,
-    branch: (typeof raw.branch === "string" ? raw.branch : undefined) ?? "main",
+    branch,
     root,
-    include: include as string[],
-    exclude: (exclude as string[] | undefined) ?? [],
+    include: validatedInclude,
+    exclude: validatedExclude,
     delete: (del as "tracked" | "none" | undefined) ?? "tracked",
     security: {
-      scanSecretsBeforePush:
-        (security?.scanSecretsBeforePush as boolean | undefined) ?? true,
+      scanSecretsBeforePush: scanSecretsBeforePush ?? true,
     },
   };
 }

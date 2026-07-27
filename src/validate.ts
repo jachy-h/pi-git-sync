@@ -8,8 +8,9 @@
  * - Skill/Theme/Prompt 基本格式
  */
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import type { PiSyncConfig } from "./config.ts";
+import { normalizePath } from "./glob.ts";
+import { resolveRepoSyncRoot, resolveWithinRoot } from "./path-safety.ts";
 
 // ========== 校验结果 ==========
 
@@ -156,10 +157,23 @@ export async function validateFiles(
   files: string[],
 ): Promise<ValidationResult> {
   const errors: ValidationError[] = [];
-  const syncRoot = join(repoPath, config.root);
+  const safeRoot = await resolveRepoSyncRoot(repoPath, config.root, "read");
 
   for (const relPath of files) {
-    const fullPath = join(syncRoot, relPath);
+    let normalizedPath: string;
+    try {
+      normalizedPath = normalizePath(relPath);
+      if (normalizedPath === "") throw new Error("Empty path");
+    } catch {
+      errors.push({
+        file: relPath,
+        message: "File path must be a non-empty relative path within the sync root.",
+        severity: "error",
+      });
+      continue;
+    }
+
+    const fullPath = await resolveWithinRoot(safeRoot, normalizedPath, "read");
 
     let content: string;
     try {
@@ -172,19 +186,19 @@ export async function validateFiles(
     // 冲突标记检查（所有文件）
     if (hasConflictMarkers(content)) {
       errors.push({
-        file: relPath,
+        file: normalizedPath,
         message: "File contains Git conflict markers (<<<<<<<, =======, >>>>>>>). Resolve conflicts before syncing.",
         severity: "error",
       });
     }
 
     // JSON 文件：格式检查
-    if (relPath.endsWith(".json")) {
-      errors.push(...validateJson(relPath, content));
+    if (normalizedPath.endsWith(".json")) {
+      errors.push(...validateJson(normalizedPath, content));
     }
 
     // settings.json：可移植性
-    if (relPath === "settings.json") {
+    if (normalizedPath === "settings.json") {
       errors.push(...validateSettingsPortability(content));
     }
   }

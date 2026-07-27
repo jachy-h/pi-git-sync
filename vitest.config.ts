@@ -11,6 +11,20 @@ export default defineConfig({
     globals: true,
     environment: "node",
     include: ["test/**/*.test.ts"],
+    fileParallelism: false,
     testTimeout: 30000,
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "json-summary", "html"],
+      reportsDirectory: "./coverage",
+      include: ["index.ts", "src/**/*.ts"],
+      exclude: ["test/**", "**/*.d.ts"],
+      thresholds: {
+        statements: 45,
+        branches: 78,
+        functions: 58,
+        lines: 45,
+      },
+    },
   },
 });

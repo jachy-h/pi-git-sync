@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
 import { normalizePath, isPathAllowed } from "./glob.ts";
 import type { PiSyncConfig } from "./config.ts";
 import type { SyncState } from "./state.ts";
+import { assertNoSymlinkComponents, resolveRepoSyncRoot } from "./path-safety.ts";
 
 // ========== 类型定义 ==========
 
@@ -109,7 +110,9 @@ async function enumerateFiles(dir: string, baseDir: string): Promise<FileEntry[]
         continue;
       }
 
-      if (entry.isDirectory()) {
+      if (entry.isSymbolicLink()) {
+        throw new Error(`Refusing to inventory symbolic link: ${fullPath}`);
+      } else if (entry.isDirectory()) {
         await walk(fullPath);
       } else if (entry.isFile()) {
         try {
@@ -147,7 +150,9 @@ export async function compareFiles(
   config: PiSyncConfig,
   state: SyncState,
 ): Promise<InventoryResult> {
-  const syncRoot = join(repoPath, config.root);
+  const safeRepoRoot = await resolveRepoSyncRoot(repoPath, config.root, "read");
+  await assertNoSymlinkComponents(agentDir);
+  const syncRoot = safeRepoRoot.path;
 
   // 枚举 agent 和 repo 中的所有文件
   const [agentFiles, repoFiles] = await Promise.all([

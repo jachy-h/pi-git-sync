@@ -9,11 +9,13 @@
  * - 计划删除的文件
  * - repo commit 和操作类型
  */
-import { mkdir, writeFile, readFile, rename, readdir, unlink, stat } from "node:fs/promises";
+import { chmod, mkdir, writeFile, readFile, rename, readdir, unlink, stat, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { sha256File } from "./inventory.ts";
+import { normalizePath } from "./glob.ts";
 import type { MaterializePlan } from "./materialize.ts";
+import { assertNoSymlinkComponents, resolveWithinRoot } from "./path-safety.ts";
 
 // ========== 类型 ==========
 
@@ -28,15 +30,83 @@ export interface Backup {
   files: Record<string, { action: "backed_up" | "will_create" | "will_delete"; sha256?: string; mode?: number }>;
 }
 
+function normalizeBackupRelativePath(relativePath: string): string {
+  const normalizedPath = normalizePath(relativePath);
+  if (normalizedPath === "") throw new Error("Backup file path must not be empty");
+  return normalizedPath;
+}
+
+function validateBackupPlan(plan: MaterializePlan | undefined): void {
+  if (!plan) return;
+  for (const item of plan.toWrite) normalizeBackupRelativePath(item.relativePath);
+  for (const relativePath of plan.toDelete) normalizeBackupRelativePath(relativePath);
+}
+
 // ========== 创建备份 ==========
 
+type PreparedBackupFile = {
+  relativePath: string;
+  action: "backed_up" | "will_create" | "will_delete";
+  content?: Buffer;
+  sha256?: string;
+  mode?: number;
+};
+
+async function prepareBackupFile(
+  agentDir: string,
+  relativePath: string,
+  action: "backed_up" | "will_delete",
+): Promise<PreparedBackupFile> {
+  const normalizedPath = normalizeBackupRelativePath(relativePath);
+  const agentPath = await resolveWithinRoot(agentDir, normalizedPath, "backup");
+
+  try {
+    const fileStat = await stat(agentPath);
+    if (!fileStat.isFile()) {
+      throw new Error(`Cannot back up non-regular file: ${normalizedPath}`);
+    }
+    const content = await readFile(agentPath);
+    return {
+      relativePath: normalizedPath,
+      action,
+      content,
+      sha256: await sha256File(agentPath),
+      mode: fileStat.mode & 0o777,
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return {
+        relativePath: normalizedPath,
+        action: action === "backed_up" ? "will_create" : "will_delete",
+      };
+    }
+    throw error;
+  }
+}
+
+async function verifyBackupData(
+  dataDir: string,
+  records: Backup["files"],
+): Promise<void> {
+  for (const [relativePath, record] of Object.entries(records)) {
+    if (!record.sha256) continue;
+    const normalizedPath = normalizeBackupRelativePath(relativePath);
+    const backupPath = join(dataDir, normalizedPath);
+    if ((await stat(backupPath)).isFile() === false) {
+      throw new Error(`Backup data is not a regular file: ${normalizedPath}`);
+    }
+    if (await sha256File(backupPath) !== record.sha256) {
+      throw new Error(`Backup data hash mismatch after creation: ${normalizedPath}`);
+    }
+  }
+}
+
 /**
- * 创建完整预操作备份
+ * 创建完整预操作备份。
  *
- * @param agentDir Pi agent 目录
- * @param commit 当前 repo commit
- * @param reason 备份原因（如 "apply", "pull", "pre-rollback"）
- * @param plan 即将执行的 materialize 计划（用于标记 will_create/will_delete）
+ * 备份采用 fail-closed 语义：所有计划文件先完成读取和元数据快照，
+ * 数据与 manifest 写入并校验成功后才返回。任意文件无法备份都会抛错，
+ * 调用方因此不会继续执行 materialize。
  */
 export async function createBackup(
   agentDir: string,
@@ -44,75 +114,63 @@ export async function createBackup(
   reason: string,
   plan?: MaterializePlan,
 ): Promise<Backup> {
+  validateBackupPlan(plan);
+  await assertNoSymlinkComponents(agentDir);
+
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const backupRoot = join(agentDir, ".pi-sync", "backups", timestamp);
   const dataDir = join(backupRoot, "data");
 
-  await mkdir(dataDir, { recursive: true });
-
-  const fileRecords: Backup["files"] = {};
-
-  // 如果提供了计划，备份将被覆盖的文件
-  if (plan) {
-    for (const item of plan.toWrite) {
-      const agentPath = join(agentDir, item.relativePath);
-      if (existsSync(agentPath)) {
-        try {
-          const content = await readFile(agentPath);
-          const fileStat = await stat(agentPath);
-          const backupPath = join(dataDir, item.relativePath);
-          await mkdir(dirname(backupPath), { recursive: true });
-          await writeFile(backupPath, content);
-          fileRecords[item.relativePath] = {
-            action: "backed_up",
-            sha256: await sha256File(agentPath),
-            mode: fileStat.mode & 0o777,
-          };
-        } catch {
-          // 备份失败不阻止操作
-        }
-      } else {
-        fileRecords[item.relativePath] = { action: "will_create" };
+  try {
+    const prepared: PreparedBackupFile[] = [];
+    if (plan) {
+      // 先完成全部 source 快照，避免只生成半份备份后开始写 agent。
+      for (const item of plan.toWrite) {
+        prepared.push(await prepareBackupFile(agentDir, item.relativePath, "backed_up"));
+      }
+      for (const relativePath of plan.toDelete) {
+        prepared.push(await prepareBackupFile(agentDir, relativePath, "will_delete"));
       }
     }
 
-    for (const relPath of plan.toDelete) {
-      const agentPath = join(agentDir, relPath);
-      if (existsSync(agentPath)) {
-        try {
-          const content = await readFile(agentPath);
-          const fileStat = await stat(agentPath);
-          const backupPath = join(dataDir, relPath);
+    await mkdir(dataDir, { recursive: true });
+    const fileRecords: Backup["files"] = {};
+
+    if (plan) {
+      for (const entry of prepared) {
+        fileRecords[entry.relativePath] = {
+          action: entry.action,
+          ...(entry.sha256 ? { sha256: entry.sha256 } : {}),
+          ...(entry.mode !== undefined ? { mode: entry.mode } : {}),
+        };
+        if (entry.content) {
+          const backupPath = join(dataDir, entry.relativePath);
           await mkdir(dirname(backupPath), { recursive: true });
-          await writeFile(backupPath, content);
-          fileRecords[relPath] = {
-            action: "will_delete",
-            sha256: await sha256File(agentPath),
-            mode: fileStat.mode & 0o777,
-          };
-        } catch {
-          // 备份失败不阻止操作
+          await writeFile(backupPath, entry.content);
         }
-      } else {
-        fileRecords[relPath] = { action: "will_delete" };
       }
+    } else {
+      // 无计划：备份整个 settings.json 和所有 agent 文件（兜底）。
+      await backupAgentDir(agentDir, dataDir, fileRecords);
     }
-  } else {
-    // 无计划：备份整个 settings.json 和所有白名单文件（兜底）
-    await backupAgentDir(agentDir, dataDir, fileRecords);
+
+    await verifyBackupData(dataDir, fileRecords);
+
+    const meta = {
+      timestamp,
+      commit,
+      reason,
+      operation: reason,
+      files: fileRecords,
+    };
+    await writeFile(join(backupRoot, "backup.json"), JSON.stringify(meta, null, 2), "utf-8");
+
+    return { ...meta, path: backupRoot };
+  } catch (error) {
+    // 不留下可被误认为完整备份的残留目录。
+    await rm(backupRoot, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
   }
-
-  // 写入元信息
-  const meta = {
-    timestamp,
-    commit,
-    reason,
-    operation: reason,
-    files: fileRecords,
-  };
-  await writeFile(join(backupRoot, "backup.json"), JSON.stringify(meta, null, 2), "utf-8");
-
-  return { ...meta, path: backupRoot };
 }
 
 /**
@@ -148,12 +206,7 @@ async function recursiveBackup(
   const { readdir: rd } = await import("node:fs/promises");
   const { relative } = await import("node:path");
 
-  let entries;
-  try {
-    entries = await rd(currentDir, { withFileTypes: true });
-  } catch {
-    return;
-  }
+  const entries = await rd(currentDir, { withFileTypes: true });
 
   for (const entry of entries) {
     const fullPath = join(currentDir, entry.name);
@@ -163,22 +216,20 @@ async function recursiveBackup(
     if (entry.name.startsWith(".") && entry.name !== ".gitignore") continue;
     if (entry.name === "npm" || entry.name === "git" || entry.name === "node_modules") continue;
 
-    if (entry.isDirectory()) {
+    if (entry.isSymbolicLink()) {
+      throw new Error(`Refusing to back up symbolic link: ${fullPath}`);
+    } else if (entry.isDirectory()) {
       await recursiveBackup(baseDir, fullPath, dataDir, records);
     } else if (entry.isFile()) {
-      try {
-        const content = await readFile(fullPath);
-        const backupPath = join(dataDir, relPath);
-        await mkdir(dirname(backupPath), { recursive: true });
-        await writeFile(backupPath, content);
-        records[relPath] = {
-          action: "backed_up",
-          sha256: await sha256File(fullPath),
-          mode: (await stat(fullPath)).mode & 0o777,
-        };
-      } catch {
-        // skip
-      }
+      const content = await readFile(fullPath);
+      const backupPath = join(dataDir, relPath);
+      await mkdir(dirname(backupPath), { recursive: true });
+      await writeFile(backupPath, content);
+      records[relPath] = {
+        action: "backed_up",
+        sha256: await sha256File(fullPath),
+        mode: (await stat(fullPath)).mode & 0o777,
+      };
     }
   }
 }
@@ -197,19 +248,22 @@ export async function restoreBackup(
 
   // 恢复所有备份的文件
   for (const [relPath, record] of Object.entries(backup.files)) {
-    const backupFilePath = join(dataDir, relPath);
-    const targetPath = join(agentDir, relPath);
+    const normalizedPath = normalizeBackupRelativePath(relPath);
+    const backupFilePath = join(dataDir, normalizedPath);
+    const targetPath = await resolveWithinRoot(agentDir, normalizedPath, "restore");
 
     if (record.action === "backed_up" || record.action === "will_delete") {
-      // 文件需要恢复
-      if (existsSync(backupFilePath)) {
-        const content = await readFile(backupFilePath);
-        await mkdir(dirname(targetPath), { recursive: true });
-        await atomicOverwrite(targetPath, content);
-        if (record.mode) {
-          try { await import("node:fs/promises").then((m) => m.chmod(targetPath, record.mode!)); } catch { /* */ }
-        }
+      // 文件需要恢复；元数据或数据不完整时必须显式失败，而不是伪装恢复成功。
+      if (!existsSync(backupFilePath)) {
+        throw new Error(`Backup data file not found: ${normalizedPath}`);
       }
+      if (record.sha256 && (await sha256File(backupFilePath)) !== record.sha256) {
+        throw new Error(`Backup data hash mismatch: ${normalizedPath}`);
+      }
+      const content = await readFile(backupFilePath);
+      await mkdir(dirname(targetPath), { recursive: true });
+      await atomicOverwrite(targetPath, content);
+      if (record.mode) await chmod(targetPath, record.mode);
     } else if (record.action === "will_create") {
       // 文件在备份时还不存在，恢复时应删除
       if (existsSync(targetPath)) {

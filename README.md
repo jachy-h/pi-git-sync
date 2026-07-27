@@ -28,7 +28,7 @@ Key features:
 
 ### Prerequisites
 
-- Pi installed
+- Pi `0.82.1` or newer (Node.js `>=22.19.0`)
 - Git + SSH configured (for GitHub)
 
 ### 1. Create an Empty Private Repo on GitHub
@@ -38,8 +38,23 @@ Create an empty private repo (any name you like). Do **NOT** check "Initialize w
 ### 2. Install pi-git-sync
 
 ```bash
-pi install npm:@jachy/pi-git-sync
+pi install npm:@jachy/pi-git-sync@<version>
 ```
+
+The config repository is user data, not a Pi package. Do not run `pi install` on the
+config repository itself.
+
+### Optional Bootstrap
+
+The bootstrap script installs the extension and then tells Pi to run `init`; it does
+not clone or install the config repository as code:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/jachy-h/pi-git-sync/main/scripts/bootstrap.sh) \
+  git@github.com:<your-username>/<your-repo>.git
+```
+
+Set `PI_GIT_SYNC_VERSION` when a specific published version is required.
 
 ### 3. One-Click Init
 
@@ -113,7 +128,7 @@ The `push` command combines capture → commit → fetch → rebase → push →
 | `settings.json` | Whole-file copy (no key-level merge) |
 | `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md` | Copied into agent directory |
 | `keybindings.json` | Copied into agent directory |
-| Third-party Packages | Declared in `sync/settings.json` → `packages[]`, auto-installed on apply (local-only packages are never auto-removed) |
+| Third-party Packages | Declared in `sync/settings.json` → `packages[]`; new or changed sources require approval before installation (local-only packages are never auto-removed) |
 
 ## What Never Gets Synced
 
@@ -121,7 +136,7 @@ Hard deny list (built-in, not configurable):
 
 `auth.json`, `sessions/**`, `trust.json`, `models-store.json`, `npm/**`, `git/**`, `node_modules/**`, `.pi-sync/**`, `**/.env`, `**/*.pem`, `**/id_rsa`, `**/id_ed25519`
 
-Also: hidden files (except `.gitignore`) and symlinks are skipped.
+Also: hidden files (except `.gitignore`) are excluded. Symlinks and symlink components are blocked with an error; they are never followed or silently skipped.
 
 ---
 
@@ -160,7 +175,7 @@ Also: hidden files (except `.gitignore`) and symlinks are skipped.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `schemaVersion` | `2` | — | Config schema version (currently `2`) |
-| `branch` | `string` | `"main"` | Git branch to sync |
+| `branch` | `string` | `"main"` | The single Git branch used by init, status, pull, push, rebase, and doctor |
 | `root` | `string` | `"sync"` | Root directory inside the repo for synced content |
 | `include` | `string[]` | — | Glob whitelist (relative to `root`). Supports `*`, `**`, `?` |
 | `exclude` | `string[]` | `[]` | Glob patterns to exclude (lower priority than built-in hard deny) |
@@ -200,7 +215,7 @@ This gives accurate detection of:
 capture (agent → repo working tree)
   → commit
   → fetch origin
-  → rebase onto origin/main
+  → rebase onto origin/<configured branch>
   → push
   → apply (new HEAD → agent)
 ```
@@ -228,9 +243,11 @@ fetch origin
 - **Bilateral conflict detection** — never silently overwrites both sides
 - Automatic **secret scanning** before push (API keys, tokens, private keys)
 - **Atomic config writes** (temp file → rename)
-- Automatic **backup** before every apply, with **rollback** support
+- Automatic **backup** before every apply, with **fail-closed rollback** support
 - **Concurrency lock** prevents multiple Pi instances from syncing simultaneously
 - **Built-in hard deny list** prevents syncing credentials (not user-overridable)
+- Repo and agent **path-boundary checks** block symlink escapes
+- Remote package additions and changes require explicit approval; failed installs attempt package rollback
 - Settings.json **portability validation** — warns about absolute paths and machine-specific content
 
 ---
@@ -257,10 +274,22 @@ pi -e ./index.ts
 
 ```bash
 npm install
-npm test           # single run
+npm test           # unit/integration suite
+npm run test:ci    # typecheck + coverage + E2E
 npm run test:watch # watch mode
 npm run typecheck  # type check
+npm audit --omit=dev --audit-level=high
+npm audit --audit-level=high
 ```
+
+### Upgrade Notes
+
+When upgrading from `0.1.x`, keep the existing config repository and run the normal
+`/pisync init <repo-url>` or `/pisync pull` flow. The local sync state migrates from
+schema v2 to v3 after backing up the old state. Equal local/repo files are reconciled;
+conflicting files are preserved and reported instead of choosing a side.
+
+See [the full upgrade guide](./docs/upgrade.md).
 
 ### Project Structure
 

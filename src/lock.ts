@@ -44,8 +44,8 @@ export class SyncLock {
         // 检查锁是否过期
         const stale = await this.isStale();
         if (stale) {
-          // 清理失效锁
-          await this.release();
+          // 当前实例并不拥有失效锁，必须直接清理后再尝试排他创建。
+          await unlink(this.lockPath).catch(() => undefined);
         } else {
           // 锁仍有效，判断是否超时
           if (timeoutMs > 0 && (Date.now() - startTime) < timeoutMs) {
@@ -129,7 +129,8 @@ export class SyncLock {
    */
   private async isStale(): Promise<boolean> {
     const info = await this.readLock();
-    if (!info) return false;
+    // 文件存在但无法解析时不可能证明锁仍有效；允许下一次 acquire 恢复。
+    if (!info) return existsSync(this.lockPath);
 
     // 检查进程是否仍在运行
     try {

@@ -23,7 +23,7 @@ function makeV2Config(overrides?: Partial<PiSyncConfig>): PiSyncConfig {
 
 function makeEmptyState(repoPath: string): SyncState {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     repoPath,
     branch: "main",
     lastSyncedCommit: null,

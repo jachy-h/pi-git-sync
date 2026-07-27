@@ -25,10 +25,9 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
-import { PiSyncCommands, getRepoPath, getRepoPathSafe, getAgentDir } from "./src/commands.ts";
-import { loadState } from "./src/state.ts";
+import { PiSyncCommands, getRepoPathSafe, getAgentDir } from "./src/commands.ts";
 import { gitStatus } from "./src/git.ts";
-import { existsSync } from "node:fs";
+import { loadPiSyncConfig } from "./src/config.ts";
 
 export default function (pi: ExtensionAPI) {
   const cmds = new PiSyncCommands();
@@ -43,7 +42,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("debug:clear-repo", {
     description: "[DEBUG] Clear local and remote sync repo contents — for testing only",
-    async handler(args, ctx) {
+    async handler(_args, ctx) {
       const confirmed = await ctx.ui.confirm(
         "⚠ DEBUG: Clear Sync Repo",
         "This will DELETE ALL contents from both local and remote sync repos.\nThis action cannot be undone. Continue?",
@@ -295,7 +294,8 @@ async function getRepoSummary(): Promise<string> {
     const rp = await getRepoPathSafe(getAgentDir());
     if (!rp) return "";
 
-    const repoStatus = await gitStatus(rp);
+    const config = await loadPiSyncConfig(rp);
+    const repoStatus = await gitStatus(rp, config.branch);
     let s = ` [${repoStatus.commitShort}`;
     if (repoStatus.remoteExists && repoStatus.behind > 0) {
       s += ` ↓${repoStatus.behind}`;
@@ -345,14 +345,24 @@ async function handleInit(
 
   if (!url) {
     ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Checking pi-sync status..."));
-    const result = await cmds.init(undefined, (msg) => {
+    let result = await cmds.init(undefined, (msg) => {
       ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", msg));
     }, force);
     ctx.ui.setStatus("pi-sync", undefined);
 
-    if (!result.message.includes("Enter your config repo Git URL")) {
+    if (result.code === "approval_required") {
+      const approval = await requestPackageApproval(result, ctx);
+      if (!approval.approved) {
+        ctx.ui.notify("Package installation cancelled.", "warning");
+        return;
+      }
+      result = await cmds.init(undefined, undefined, force, approval);
+    }
+
+    const details = result.details as { needsGitUrl?: boolean } | undefined;
+    if (!details?.needsGitUrl) {
       notifyInitResult(result, ctx);
-      if (result.needsReload) await ctx.reload();
+      if (result.reload) await ctx.reload();
       return;
     }
 
@@ -368,16 +378,42 @@ async function handleInit(
   }
 
   ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Initializing..."));
-  const initResult = await cmds.init(url, (msg) => {
+  let initResult = await cmds.init(url, (msg) => {
     ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", msg));
   }, force);
   ctx.ui.setStatus("pi-sync", undefined);
 
+  if (initResult.code === "approval_required") {
+    const approval = await requestPackageApproval(initResult, ctx);
+    if (!approval.approved) {
+      ctx.ui.notify("Package installation cancelled.", "warning");
+      return;
+    }
+    initResult = await cmds.init(url, undefined, force, approval);
+  }
+
   notifyInitResult(initResult, ctx);
 
-  if (initResult.needsReload) {
+  if (initResult.reload) {
     await ctx.reload();
   }
+}
+
+async function requestPackageApproval(
+  result: { details?: unknown },
+  ctx: ExtensionCommandContext,
+): Promise<{ approved: boolean; approvedSources: string[]; remember: boolean }> {
+  const details = result.details as { packages?: unknown } | undefined;
+  const packages = Array.isArray(details?.packages)
+    ? details.packages.filter((pkg): pkg is string => typeof pkg === "string")
+    : [];
+  const approved = await ctx.ui.confirm(
+    "pi-sync: Approve package installation",
+    packages.length > 0
+      ? `The synced settings request these packages:\n\n${packages.join("\n")}\n\nInstall them?`
+      : "The synced settings request package changes. Install them?",
+  );
+  return { approved, approvedSources: approved ? packages : [], remember: false };
 }
 
 function notifyInitResult(
@@ -405,7 +441,7 @@ async function handleDoctor(cmds: PiSyncCommands, ctx: ExtensionCommandContext):
 // ========== 通用纯文本输出（text 颜色） ==========
 
 async function showOutput(ctx: ExtensionCommandContext, text: string): Promise<void> {
-  await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+  await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
     const lines = text.split("\n");
     return {
       render: (_w: number) => lines.map((l) => theme.fg("text", l)),
@@ -433,57 +469,43 @@ async function handlePush(
     return;
   }
 
-  // 第一步：capture + diff
+  // 第一步：结构化准备，不依赖人类可读文案决定控制流
   ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Checking changes..."));
-
-  // 先 capture 看看有什么变化
-  const captureOutput = await cmds.capture();
+  const preparation = await cmds.preparePush();
   ctx.ui.setStatus("pi-sync", undefined);
 
-  if (captureOutput.includes("blocked") || captureOutput.includes("No changes")) {
-    // 被阻止或无变更，直接展示
-    const lower = captureOutput.toLowerCase();
-    if (lower.includes("no changes") || lower.includes("nothing to")) {
-      ctx.ui.notify(captureOutput, "warning");
-    } else {
-      ctx.ui.notify(captureOutput, "error");
-    }
+  if (preparation.kind === "noop") {
+    ctx.ui.notify(preparation.message ?? "No changes to push.", "warning");
+    return;
+  }
+  if (preparation.kind === "blocked") {
+    ctx.ui.notify(preparation.message ?? "Push blocked.", "error");
     return;
   }
 
-  // 展示已捕获的内容 + 请求确认
-  ctx.ui.notify(captureOutput, "info");
+  ctx.ui.notify(
+    `${preparation.message ?? "Push ready."}\n\n` +
+    `Captured: ${preparation.capture.captured.length}, deleted: ${preparation.capture.deleted.length}\n\n` +
+    preparation.diff,
+    "info",
+  );
 
-  // 展示 diff
-  ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Generating diff..."));
-  const diffOutput = await cmds.diff();
-  ctx.ui.setStatus("pi-sync", undefined);
-
-  // 提取 Git diff 部分展示（如果有）
-  ctx.ui.notify(diffOutput, "info");
-
-  // 确认
   const confirmed = await ctx.ui.confirm(
     "pi-sync: Confirm push",
     "Push these changes to the remote repository?",
   );
-
   if (!confirmed) {
-    ctx.ui.notify("Push cancelled.", "warning");
+    ctx.ui.notify("Push cancelled. The captured repository changes were kept for retry.", "warning");
     return;
   }
 
-  // 第二步：执行实际 push
   ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Pushing..."));
-  const result = await cmds.push(undefined, subArgs);
+  const result = await cmds.executePush(preparation);
   ctx.ui.setStatus("pi-sync", undefined);
 
   const classified = classifyResult(result.message, "Push");
   notifyResult(classified, ctx);
-
-  if (result.reload) {
-    await ctx.reload();
-  }
+  if (result.reload) await ctx.reload();
 }
 
 // ========== capture ==========
@@ -501,22 +523,26 @@ async function handleCapture(cmds: PiSyncCommands, ctx: ExtensionCommandContext)
 
 async function handlePull(cmds: PiSyncCommands, ctx: ExtensionCommandContext): Promise<void> {
   ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Checking remote..."));
-  const result = await cmds.pull();
+  let result = await cmds.pull();
   ctx.ui.setStatus("pi-sync", undefined);
 
-  if (result.message.includes("Already up to date") || result.message.includes("No changes")) {
+  if (result.code === "approval_required") {
+    const approval = await requestPackageApproval(result, ctx);
+    if (!approval.approved) {
+      ctx.ui.notify("Package installation cancelled.", "warning");
+      return;
+    }
+    ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Applying approved packages..."));
+    result = await cmds.pull(undefined, approval);
+    ctx.ui.setStatus("pi-sync", undefined);
+  }
+
+  if (result.code === "noop") {
     ctx.ui.notify(result.message, "warning");
     return;
   }
 
-  if (result.message.includes("blocked") || result.message.includes("failed") ||
-      result.message.includes("Local changes detected")) {
-    ctx.ui.notify(result.message, "error");
-    return;
-  }
-
-  // 展示结果
-  ctx.ui.notify(result.message, "info");
+  ctx.ui.notify(result.message, result.ok ? "info" : "error");
 
   if (result.reload) {
     await ctx.reload();

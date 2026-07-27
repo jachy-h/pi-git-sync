@@ -25,7 +25,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.19.0"
   },
   "keywords": [
     "pi-package",
@@ -43,6 +43,11 @@
   },
   "scripts": {
     "test": "vitest run",
+    "test:unit": "vitest run",
+    "test:integration": "vitest run test/integration test/contract --passWithNoTests",
+    "test:e2e": "vitest run test/e2e --no-file-parallelism --passWithNoTests",
+    "test:coverage": "vitest run --coverage",
+    "test:ci": "npm run typecheck && npm run test:coverage && npm run test:e2e",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run typecheck && npm test",
@@ -51,14 +56,24 @@
     "pub:major": "npm version major && npm publish --access public"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": "^0.82.1",
+    "@earendil-works/pi-coding-agent": "^0.82.1",
+    "@earendil-works/pi-tui": "^0.82.1",
     "typebox": "*"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.82.1",
     "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^3.2.7",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0"
+    "vitest": "^3.2.7"
+  },
+  "overrides": {
+    "test-exclude": "8.0.0",
+    "@earendil-works/pi-coding-agent": {
+      "minimatch": {
+        "brace-expansion": "5.0.8"
+      }
+    }
   }
 }

@@ -10,11 +10,12 @@
  * - 文件权限
  * - 符号链接
  */
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, lstat, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { gitExec } from "./git.ts";
+import { gitProbe } from "./git.ts";
 import type { PiSyncConfig } from "./config.ts";
+import { resolveRepoSyncRoot } from "./path-safety.ts";
 
 // ========== 类型 ==========
 
@@ -43,10 +44,11 @@ export async function runDoctorChecks(
   checks.push(await checkRepoExists(repoPath));
   checks.push(await checkRemoteOrigin(repoPath));
   checks.push(checkConfigFormat(config));
+  checks.push(await checkConfiguredBranch(repoPath, config));
   checks.push(await checkSettingsPortability(repoPath, config));
   checks.push(await checkPiGitSyncInPackages(repoPath, config));
   checks.push(await checkFilePermissions(repoPath));
-  checks.push(await checkSymlinks(repoPath));
+  checks.push(await checkSymlinks(repoPath, agentDir, config));
   checks.push(await checkAbsolutePaths(repoPath, config));
 
   const summary = {
@@ -61,44 +63,36 @@ export async function runDoctorChecks(
 // ========== 各项检查 ==========
 
 async function checkGitAvailable(): Promise<DoctorCheck> {
-  try {
-    const result = await gitExec(process.cwd(), ["--version"]);
-    if (result.stdout.includes("git version")) {
-      return { name: "Git", status: "ok", message: result.stdout.trim() };
-    }
-    return { name: "Git", status: "error", message: "Git not found" };
-  } catch {
-    return { name: "Git", status: "error", message: "Git command not available in PATH" };
+  const result = await gitProbe(process.cwd(), ["--version"]);
+  if (result.ok && result.stdout.includes("git version")) {
+    return { name: "Git", status: "ok", message: result.stdout.trim() };
   }
+  return { name: "Git", status: "error", message: "Git command not available in PATH" };
 }
 
 async function checkSshAvailable(repoPath: string): Promise<DoctorCheck> {
-  try {
-    const result = await gitExec(repoPath, ["remote", "get-url", "origin"]);
-    const url = result.stdout.trim();
-    if (!url) {
-      return { name: "SSH", status: "warning", message: "No 'origin' remote configured" };
-    }
-    if (!/^git@|^ssh:\/\//.test(url)) {
-      return { name: "SSH", status: "ok", message: "HTTPS remote (SSH check skipped)" };
-    }
-
-    const probe = await gitExec(repoPath, ["ls-remote", "origin"], { timeout: 20000 });
-    const hostMatch = url.match(/(?:git@|ssh:\/\/git@)([^:/]+)/);
-    const host = hostMatch?.[1] ?? "remote";
-
-    if (/fatal:|error:|Permission denied|Could not read from remote|Host key verification failed/i.test(`${probe.stderr}\n${probe.stdout}`)) {
-      return {
-        name: "SSH",
-        status: "error",
-        message: `Cannot reach ${host} via SSH: ${probe.stderr.trim() || probe.stdout.trim()}. ` +
-          "Tip: run `ssh -T git@github.com` in a terminal to confirm access.",
-      };
-    }
-    return { name: "SSH", status: "ok", message: `Authenticated to ${host} (${url})` };
-  } catch {
-    return { name: "SSH", status: "warning", message: "Could not determine remote URL" };
+  const urlProbe = await gitProbe(repoPath, ["remote", "get-url", "origin"]);
+  const url = urlProbe.stdout.trim();
+  if (!url) {
+    return { name: "SSH", status: "warning", message: "No 'origin' remote configured" };
   }
+  if (!/^git@|^ssh:\/\//.test(url)) {
+    return { name: "SSH", status: "ok", message: "HTTPS remote (SSH check skipped)" };
+  }
+
+  const probe = await gitProbe(repoPath, ["ls-remote", "origin"], { timeout: 20000 });
+  const hostMatch = url.match(/(?:git@|ssh:\/\/git@)([^:/]+)/);
+  const host = hostMatch?.[1] ?? "remote";
+
+  if (!probe.ok || /fatal:|error:|Permission denied|Could not read from remote|Host key verification failed/i.test(`${probe.stderr}\n${probe.stdout}`)) {
+    return {
+      name: "SSH",
+      status: "error",
+      message: `Cannot reach ${host} via SSH: ${probe.stderr.trim() || probe.stdout.trim()}. ` +
+        "Tip: run `ssh -T git@github.com` in a terminal to confirm access.",
+    };
+  }
+  return { name: "SSH", status: "ok", message: `Authenticated to ${host} (${url})` };
 }
 
 async function checkRepoExists(repoPath: string): Promise<DoctorCheck> {
@@ -110,16 +104,11 @@ async function checkRepoExists(repoPath: string): Promise<DoctorCheck> {
 }
 
 async function checkRemoteOrigin(repoPath: string): Promise<DoctorCheck> {
-  try {
-    const result = await gitExec(repoPath, ["remote", "get-url", "origin"]);
-    const url = result.stdout.trim();
-    if (url) {
-      return { name: "Remote", status: "ok", message: `Origin: ${url}` };
-    }
-    return { name: "Remote", status: "warning", message: "No 'origin' remote configured" };
-  } catch {
-    return { name: "Remote", status: "warning", message: "No 'origin' remote configured" };
+  const probe = await gitProbe(repoPath, ["remote", "get-url", "origin"]);
+  if (probe.ok && probe.stdout.trim()) {
+    return { name: "Remote", status: "ok", message: `Origin: ${probe.stdout.trim()}` };
   }
+  return { name: "Remote", status: "warning", message: "No 'origin' remote configured" };
 }
 
 function checkConfigFormat(config: PiSyncConfig): DoctorCheck {
@@ -127,6 +116,59 @@ function checkConfigFormat(config: PiSyncConfig): DoctorCheck {
     name: "pi-sync.json",
     status: "ok",
     message: `Schema v${config.schemaVersion}, root="${config.root}", ${config.include.length} include patterns`,
+  };
+}
+
+async function checkConfiguredBranch(
+  repoPath: string,
+  config: PiSyncConfig,
+): Promise<DoctorCheck> {
+  const formatProbe = await gitProbe(repoPath, ["check-ref-format", "--branch", config.branch]);
+  if (!formatProbe.ok) {
+    return {
+      name: "Configured Branch",
+      status: "error",
+      message: `Invalid configured branch: ${config.branch}`,
+    };
+  }
+
+  const currentProbe = await gitProbe(repoPath, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (!currentProbe.ok) {
+    return {
+      name: "Configured Branch",
+      status: "error",
+      message: `Cannot determine current branch; expected ${config.branch}`,
+    };
+  }
+
+  const current = currentProbe.stdout.trim();
+  if (current !== config.branch) {
+    return {
+      name: "Configured Branch",
+      status: "error",
+      message: `Repository is on ${current}, but pi-sync.json targets ${config.branch}`,
+    };
+  }
+
+  const remoteProbe = await gitProbe(repoPath, ["ls-remote", "--heads", "origin", config.branch]);
+  if (!remoteProbe.ok) {
+    return {
+      name: "Configured Branch",
+      status: "warning",
+      message: `Could not verify origin/${config.branch}: ${remoteProbe.stderr.trim() || "remote unavailable"}`,
+    };
+  }
+  if (!remoteProbe.stdout.trim()) {
+    return {
+      name: "Configured Branch",
+      status: "warning",
+      message: `origin/${config.branch} does not exist yet; first push will create it`,
+    };
+  }
+  return {
+    name: "Configured Branch",
+    status: "ok",
+    message: `Current and remote branch: ${config.branch}`,
   };
 }
 
@@ -255,25 +297,41 @@ async function checkFilePermissions(repoPath: string): Promise<DoctorCheck> {
   return { name: "Permissions", status: "ok", message: "No permission issues" };
 }
 
-async function checkSymlinks(repoPath: string): Promise<DoctorCheck> {
-  const checkDirs = ["sync", "skills", "extensions", "prompts", "themes"];
-  const warnings: string[] = [];
+async function checkSymlinks(
+  repoPath: string,
+  agentDir: string,
+  config: PiSyncConfig,
+): Promise<DoctorCheck> {
+  const findings: string[] = [];
 
-  for (const dir of checkDirs) {
-    const dirPath = join(repoPath, dir);
-    if (!existsSync(dirPath)) continue;
-    try {
-      const fileStat = await stat(dirPath);
-      if (fileStat.isSymbolicLink()) {
-        warnings.push(`${dir}/ is a symlink`);
-      }
-    } catch {
-      // skip
+  const inspect = async (root: string): Promise<void> => {
+    if (!existsSync(root)) return;
+    const info = await lstat(root);
+    if (info.isSymbolicLink()) {
+      findings.push(`${root} is a symlink`);
+      return;
     }
+    if (!info.isDirectory()) return;
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      const fullPath = join(root, entry.name);
+      if (entry.isSymbolicLink()) {
+        findings.push(`${fullPath} is a symlink`);
+      } else if (entry.isDirectory()) {
+        await inspect(fullPath);
+      }
+    }
+  };
+
+  try {
+    await inspect(repoPath);
+    await inspect(agentDir);
+    await resolveRepoSyncRoot(repoPath, config.root, "read");
+  } catch (error) {
+    findings.push(error instanceof Error ? error.message : "Unable to inspect symlink safety");
   }
 
-  if (warnings.length > 0) {
-    return { name: "Symlinks", status: "warning", message: warnings.join("; ") };
+  if (findings.length > 0) {
+    return { name: "Symlinks", status: "error", message: findings.join("; ") };
   }
   return { name: "Symlinks", status: "ok", message: "No problematic symlinks" };
 }

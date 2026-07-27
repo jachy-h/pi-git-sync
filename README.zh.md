@@ -28,7 +28,7 @@ pi-git-sync 将你的 Pi 配置保存在一个**私有 Git 仓库**中，并在�
 
 ### 前置条件
 
-- Pi 已安装
+- Pi `0.82.1` 或更高版本（Node.js `>=22.19.0`）
 - Git 和 SSH 已配置（用于 GitHub）
 
 ### 1. 在 GitHub 创建空私有仓库
@@ -38,8 +38,21 @@ pi-git-sync 将你的 Pi 配置保存在一个**私有 Git 仓库**中，并在�
 ### 2. 安装 pi-git-sync
 
 ```bash
-pi install npm:@jachy/pi-git-sync
+pi install npm:@jachy/pi-git-sync@<version>
 ```
+
+配置仓库是用户数据，不是 Pi Package。不要对配置仓库本身执行 `pi install`。
+
+### 可选 Bootstrap
+
+Bootstrap 脚本只安装扩展，然后提示 Pi 执行 `init`；不会把配置仓库 clone 后当作代码安装：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/jachy-h/pi-git-sync/main/scripts/bootstrap.sh) \
+  git@github.com:<your-username>/<your-repo>.git
+```
+
+需要固定发布版本时，可设置 `PI_GIT_SYNC_VERSION`。
 
 ### 3. 一键初始化
 
@@ -113,7 +126,7 @@ pi install npm:@jachy/pi-git-sync
 | `settings.json` | 整文件复制（不做 key 级别合并） |
 | `AGENTS.md`、`SYSTEM.md`、`APPEND_SYSTEM.md` | 复制到 agent 目录 |
 | `keybindings.json` | 复制到 agent 目录 |
-| 第三方 Packages | 在 `sync/settings.json` → `packages[]` 中声明，apply 时自动安装（不会自动卸载本地 package） |
+| 第三方 Packages | 在 `sync/settings.json` → `packages[]` 中声明；新增或变更 source 必须审批后安装（不会自动卸载本地 package） |
 
 ## 不同步的内容
 
@@ -121,7 +134,7 @@ pi install npm:@jachy/pi-git-sync
 
 `auth.json`、`sessions/**`、`trust.json`、`models-store.json`、`npm/**`、`git/**`、`node_modules/**`、`.pi-sync/**`、`**/.env`、`**/*.pem`、`**/id_rsa`、`**/id_ed25519`
 
-此外，隐藏文件（`.gitignore` 除外）和符号链接也会被跳过。
+此外，隐藏文件（`.gitignore` 除外）会被排除。符号链接及其中间路径会直接阻断，并不会被跟随或静默跳过。
 
 ---
 
@@ -160,7 +173,7 @@ pi install npm:@jachy/pi-git-sync
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `schemaVersion` | `2` | — | 配置 schema 版本（当前为 `2`） |
-| `branch` | `string` | `"main"` | 同步的 Git 分支 |
+| `branch` | `string` | `"main"` | init、status、pull、push、rebase、doctor 统一使用的唯一 Git 分支 |
 | `root` | `string` | `"sync"` | 仓库中同步内容的根目录 |
 | `include` | `string[]` | — | Glob 白名单（相对于 `root`）。支持 `*`、`**`、`?` |
 | `exclude` | `string[]` | `[]` | Glob 排除列表（优先级低于内置 hard deny） |
@@ -200,7 +213,7 @@ R = 远端（当前仓库 sync/ 文件）
 capture（agent → 仓库工作树）
   → commit
   → fetch origin
-  → rebase 到 origin/main
+  → rebase 到 origin/<配置分支>
   → push
   → apply（新 HEAD → agent）
 ```
@@ -228,9 +241,11 @@ fetch origin
 - **双边冲突检测** — 从不会静默覆盖双方修改
 - Push 前自动**扫描敏感信息**（API Key、Token、私钥等）
 - **原子配置写入**（临时文件 → rename）
-- 每次 apply 前自动**备份**，支持**回滚**
+- 每次 apply 前自动**备份**，失败时 fail-closed 并支持**回滚**
 - **并发锁**防止多个 Pi 实例同时同步
 - **内置 hard deny 列表**防止同步凭证（用户不可覆盖）
+- 仓库和 agent 的**路径边界检查**阻断 symlink 越界
+- 远端新增或变更 package 必须明确审批；安装失败会尝试回滚 package
 - Settings.json **可移植性校验** — 对绝对路径和机器专属内容发出警告
 
 ---
@@ -257,10 +272,21 @@ pi -e ./index.ts
 
 ```bash
 npm install
-npm test           # 单次运行
+npm test           # 单元/集成测试
+npm run test:ci    # 类型检查 + 覆盖率 + E2E
 npm run test:watch # 监听模式
 npm run typecheck  # 类型检查
+npm audit --omit=dev --audit-level=high
+npm audit --audit-level=high
 ```
+
+### 升级说明
+
+从 `0.1.x` 升级时保留现有配置仓库，执行正常的 `/pisync init <repo-url>` 或
+`/pisync pull` 流程。本地同步 state 会在备份旧文件后从 schema v2 迁移到 v3。
+本地与仓库一致的文件会自动收敛；冲突文件会保留现状并报告，不会自动选边。
+
+详见[完整升级指南](./docs/upgrade.md)。
 
 ### 项目结构
 

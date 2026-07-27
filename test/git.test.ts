@@ -13,6 +13,10 @@ import {
   hasUncommittedChanges,
   canFastForward,
   gitDiff,
+  getGitOperationState,
+  hasUnmergedPaths,
+  isWorktreeClean,
+  gitExec,
 } from "../src/git.ts";
 
 const execAsync = promisify(execCb);
@@ -160,6 +164,47 @@ describe("git", () => {
       const diff = await gitDiff(repoDir);
       expect(diff).toContain("hello");
       expect(diff).toContain("world");
+    });
+  });
+
+  describe("hasUnmergedPaths", () => {
+    it("returns false for a clean repo with no merge in progress", async () => {
+      expect(await hasUnmergedPaths(repoDir)).toBe(false);
+    });
+  });
+
+  describe("isWorktreeClean", () => {
+    it("returns true for a clean repo", async () => {
+      expect(await isWorktreeClean(repoDir)).toBe(true);
+    });
+
+    it("returns false when there are unstaged changes", async () => {
+      await writeFile(join(repoDir, "dirty.txt"), "unstaged");
+      expect(await isWorktreeClean(repoDir)).toBe(false);
+    });
+  });
+
+  describe("getGitOperationState", () => {
+    it("returns isRebasing=false isMerging=false for a normal repo", async () => {
+      const state = await getGitOperationState(repoDir);
+      expect(state).toEqual({
+        isRebasing: false,
+        isMerging: false,
+        hasConflicts: false,
+      });
+    });
+  });
+
+  describe("gitExec edge cases", () => {
+    it("throws GitCommandError on command failure", async () => {
+      await expect(
+        gitExec(repoDir, ["nonexistent-command"])
+      ).rejects.toThrow("git nonexistent-command failed");
+    });
+
+    it("respects timeout option", async () => {
+      const result = await gitExec(repoDir, ["log", "--format=%H"], { timeout: 5000 });
+      expect(typeof result.stdout).toBe("string");
     });
   });
 });

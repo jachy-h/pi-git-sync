@@ -46,8 +46,8 @@ export function normalizePath(input: string): string {
 
   let normalized = input.replace(/\\/g, "/");
 
-  // 拒绝绝对路径
-  if (normalized.startsWith("/")) {
+  // 拒绝 POSIX、UNC 和 Windows 盘符绝对路径
+  if (normalized.startsWith("/") || /^[A-Za-z]:/.test(normalized)) {
     throw new Error(`Absolute path not allowed: ${input}`);
   }
 

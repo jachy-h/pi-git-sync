@@ -1,0 +1,107 @@
+import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import type { FileChangeType, FileComparison } from "../src/inventory.ts";
+import {
+  compareFiles,
+  getApplicableFiles,
+  getCapturableFiles,
+  hasBilateralConflicts,
+  hasLocalChanges,
+  sha256,
+} from "../src/inventory.ts";
+import { createPiSyncConfig, createSyncState } from "./helpers/factories.ts";
+import { withTestEnvironment } from "./helpers/temp-env.ts";
+
+type Scenario = {
+  name: string;
+  baseline?: string;
+  local?: string;
+  remote?: string;
+  expected: FileChangeType;
+};
+
+const scenarios: Scenario[] = [
+  { name: "no change", baseline: "base", local: "base", remote: "base", expected: "no_change" },
+  { name: "local-only update", baseline: "base", local: "local", remote: "base", expected: "local_only" },
+  { name: "remote-only update", baseline: "base", local: "base", remote: "remote", expected: "remote_only" },
+  { name: "identical bilateral update", baseline: "base", local: "same", remote: "same", expected: "converged" },
+  { name: "different bilateral update", baseline: "base", local: "local", remote: "remote", expected: "both_modified" },
+  { name: "local create", local: "local", expected: "local_created" },
+  { name: "remote create", remote: "remote", expected: "remote_created" },
+  { name: "local delete", baseline: "base", remote: "base", expected: "local_deleted" },
+  { name: "remote delete", baseline: "base", local: "base", expected: "remote_deleted" },
+  { name: "both delete", baseline: "base", expected: "both_deleted" },
+  { name: "local update and remote delete", baseline: "base", local: "local", expected: "local_modified_remote_deleted" },
+  { name: "local delete and remote update", baseline: "base", remote: "remote", expected: "local_deleted_remote_modified" },
+  { name: "identical concurrent create", local: "same", remote: "same", expected: "converged" },
+  { name: "different concurrent create", local: "local", remote: "remote", expected: "both_modified" },
+];
+
+describe.sequential("three-way inventory", () => {
+  it.each(scenarios)("classifies $name", async ({ baseline, local, remote, expected }) => {
+    await withTestEnvironment(async (environment) => {
+      const relativePath = "themes/dark.json";
+      if (local !== undefined) await environment.writeAgentFile(relativePath, local);
+      if (remote !== undefined) await environment.writeRepoFile(`sync/${relativePath}`, remote);
+
+      const state = createSyncState({
+        repoPath: environment.repoDir,
+        files: baseline === undefined ? {} : {
+          [relativePath]: { sha256: sha256(baseline), mode: 0o644 },
+        },
+      });
+      const inventory = await compareFiles(
+        environment.agentDir,
+        environment.repoDir,
+        createPiSyncConfig({ include: ["**"] }),
+        state,
+      );
+
+      expect(inventory.comparisons).toHaveLength(1);
+      expect(inventory.comparisons[0]).toMatchObject({ relativePath, changeType: expected });
+    });
+  });
+
+  it("selects capture/apply candidates and identifies bilateral conflicts", () => {
+    const comparisons = [
+      "local_only",
+      "local_created",
+      "local_deleted",
+      "remote_only",
+      "remote_created",
+      "remote_deleted",
+      "both_deleted",
+      "converged",
+      "both_modified",
+      "local_modified_remote_deleted",
+      "local_deleted_remote_modified",
+    ].map((changeType) => ({ relativePath: changeType, changeType }) as FileComparison);
+
+    expect(getCapturableFiles(comparisons).map(({ changeType }) => changeType))
+      .toEqual(["local_only", "local_created", "local_deleted"]);
+    expect(getApplicableFiles(comparisons).map(({ changeType }) => changeType))
+      .toEqual(["remote_only", "remote_created", "remote_deleted", "both_deleted", "converged"]);
+    expect(hasLocalChanges(comparisons)).toBe(true);
+    expect(hasBilateralConflicts(comparisons)).toBe(true);
+  });
+
+  it("does not inventory hidden files and blocks symbolic links", async () => {
+    await withTestEnvironment(async (environment) => {
+      const outsidePath = join(environment.rootDir, "outside.txt");
+      const linkPath = join(environment.agentDir, "themes", "linked.txt");
+      await mkdir(join(environment.agentDir, "themes"), { recursive: true });
+      await writeFile(outsidePath, "outside", "utf-8");
+      await writeFile(join(environment.agentDir, ".secret"), "hidden", "utf-8");
+      await writeFile(join(environment.agentDir, ".gitignore"), "*.tmp\n", "utf-8");
+      await symlink(outsidePath, linkPath);
+
+      await expect(compareFiles(
+        environment.agentDir,
+        environment.repoDir,
+        createPiSyncConfig({ include: ["**"] }),
+        createSyncState({ repoPath: environment.repoDir }),
+      )).rejects.toThrow("Refusing to inventory symbolic link");
+    });
+  });
+});

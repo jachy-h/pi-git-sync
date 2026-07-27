@@ -13,20 +13,18 @@
  */
 import { readFile, writeFile, mkdir, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { dirname } from "node:path";
 import type { PiSyncConfig } from "./config.ts";
 import type { SyncState } from "./state.ts";
 import {
   compareFiles,
   getCapturableFiles,
-  hasBilateralConflicts,
   sha256File,
   type FileComparison,
-  type FileEntry,
 } from "./inventory.ts";
 import { normalizePath, isPathAllowed } from "./glob.ts";
 import { isDenied } from "./security.ts";
-import { atomicWrite } from "./materialize.ts";
+import { resolveRepoSyncRoot, resolveWithinRoot } from "./path-safety.ts";
 
 export interface CaptureResult {
   /** 已捕获的文件路径 */
@@ -52,7 +50,7 @@ export async function captureChanges(
   config: PiSyncConfig,
   state: SyncState,
 ): Promise<CaptureResult> {
-  const syncRoot = join(repoPath, config.root);
+  const safeRoot = await resolveRepoSyncRoot(repoPath, config.root, "write");
   const inventory = await compareFiles(agentDir, repoPath, config, state);
 
   const result: CaptureResult = {
@@ -96,8 +94,8 @@ export async function captureChanges(
         continue; // 不在白名单内，静默跳过
       }
 
-      const repoFilePath = join(syncRoot, relPath);
-      const agentFilePath = join(agentDir, relPath);
+      const repoFilePath = await resolveWithinRoot(safeRoot, relPath, "write");
+      const agentFilePath = await resolveWithinRoot(agentDir, relPath, "read");
 
       if (comp.changeType === "local_deleted") {
         // agent 中删除了，repo 中也删除
@@ -135,13 +133,15 @@ export async function verifyCapture(
   config: PiSyncConfig,
   files: string[],
 ): Promise<Array<{ file: string; match: boolean; error?: string }>> {
-  const syncRoot = join(repoPath, config.root);
+  const safeRoot = await resolveRepoSyncRoot(repoPath, config.root, "read");
   const results: Array<{ file: string; match: boolean; error?: string }> = [];
 
   for (const relPath of files) {
     try {
-      const agentPath = join(agentDir, relPath);
-      const repoPath_ = join(syncRoot, relPath);
+      const normalizedPath = normalizePath(relPath);
+      if (normalizedPath === "") throw new Error("Path must not be empty");
+      const agentPath = await resolveWithinRoot(agentDir, normalizedPath, "read");
+      const repoPath_ = await resolveWithinRoot(safeRoot, normalizedPath, "read");
 
       if (!existsSync(agentPath) || !existsSync(repoPath_)) {
         results.push({ file: relPath, match: false, error: "File missing from one side" });
