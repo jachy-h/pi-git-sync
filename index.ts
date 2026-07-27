@@ -26,6 +26,7 @@ import type {
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
+	Input,
 	type SelectItem,
 	SelectList,
 	Text,
@@ -343,13 +344,17 @@ async function showTuiMenu(
 		});
 		selectList.onSelect = (item) => done(item.value);
 		selectList.onCancel = () => done(null);
+
+		const filterInput = new Input();
+		container.addChild(new Text(theme.fg("dim", "Filter commands:"), 1, 0));
+		container.addChild(filterInput);
 		container.addChild(selectList);
 
 		container.addChild(
 			new Text(
 				theme.fg(
 					"dim",
-					"↑↓ navigate • enter select • esc cancel • or type /pisync <cmd>",
+					"Type to filter • ↑↓ navigate • enter select • esc cancel",
 				),
 				1,
 				0,
@@ -362,6 +367,11 @@ async function showTuiMenu(
 			render: (w: number) => container.render(w),
 			invalidate: () => container.invalidate(),
 			handleInput: (data: string) => {
+				const previousFilter = filterInput.getValue();
+				filterInput.handleInput(data);
+				if (filterInput.getValue() !== previousFilter) {
+					selectList.setFilter(filterInput.getValue());
+				}
 				selectList.handleInput(data);
 				tui.requestRender();
 			},

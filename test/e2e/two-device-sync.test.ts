@@ -5,7 +5,11 @@ import { PiSyncCommands } from "../../src/commands.ts";
 import { sha256 } from "../../src/inventory.ts";
 import { saveState } from "../../src/state.ts";
 import { createSyncState } from "../helpers/factories.ts";
-import { createGitFixture, runGit } from "../helpers/git-fixture.ts";
+import {
+	configureGitRepository,
+	createGitFixture,
+	runGit,
+} from "../helpers/git-fixture.ts";
 import { withTestEnvironment } from "../helpers/temp-env.ts";
 
 const config = {
@@ -98,6 +102,7 @@ describe.sequential("Two-device sync E2E", () => {
 			try {
 				// Clone the remote (B's repo)
 				await runGit(envA.rootDir, ["clone", fixture.remotePath, envB.repoDir]);
+				await configureGitRepository(envB.repoDir);
 
 				// Set B's baseline to the original (before A's push)
 				await envB.writeAgentFile("prompts/welcome.md", baselineContent);
@@ -191,6 +196,7 @@ describe.sequential("Two-device sync E2E", () => {
 			const envB = await createEnv("pi-git-sync-b-");
 			try {
 				await runGit(envA.rootDir, ["clone", fixture.remotePath, envB.repoDir]);
+				await configureGitRepository(envB.repoDir);
 				await envB.writeAgentFile("prompts/welcome.md", baselineContent);
 				await saveState(
 					envB.agentDir,

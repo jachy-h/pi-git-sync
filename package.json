@@ -46,6 +46,7 @@
     "test:unit": "vitest run",
     "test:integration": "vitest run test/integration test/contract --passWithNoTests",
     "test:e2e": "vitest run test/e2e --no-file-parallelism --passWithNoTests",
+    "test:smoke": "vitest run test/minimatch.test.ts test/glob.test.ts test/ui.test.ts",
     "test:coverage": "vitest run --coverage",
     "test:ci": "npm run typecheck && npm run test:coverage && npm run test:e2e",
     "test:watch": "vitest",

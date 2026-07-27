@@ -63,6 +63,36 @@ class RpcFakeUi extends FakeUi {
 	}
 }
 
+class FilterableMenuFakeUi extends FakeUi {
+	renderedLines: string[] = [];
+
+	async custom<T>(renderer: unknown): Promise<T | undefined> {
+		const menuTheme = { ...this.theme, bold: (text: string) => text };
+		const createComponent = renderer as (
+			tui: { requestRender: () => void },
+			theme: {
+				fg: (role: string, text: string) => string;
+				bold: (text: string) => string;
+			},
+			keybindings: unknown,
+			done: (value?: T) => void,
+		) => {
+			render: (width: number) => string[];
+			handleInput?: (data: string) => void;
+		};
+		const component = createComponent(
+			{ requestRender: () => {} },
+			menuTheme,
+			undefined,
+			() => {},
+		);
+
+		for (const key of ["s", "t", "a"]) component.handleInput?.(key);
+		this.renderedLines = component.render(120);
+		return undefined;
+	}
+}
+
 function createRpcContext(): FakeCommandContext {
 	const ctx = new FakeCommandContext("rpc");
 	const rpcUi = new RpcFakeUi();
@@ -152,6 +182,24 @@ describe("Extension registration", () => {
 		expect(
 			api.commands.get("pisync")!.getArgumentCompletions?.("init "),
 		).toBeNull();
+	});
+
+	it("filters commands typed into the /pisync menu", async () => {
+		const api = new FakeExtensionApi();
+		register(api);
+		const ui = new FilterableMenuFakeUi();
+		const ctx = {
+			mode: "tui",
+			ui,
+			reload: async () => {},
+		} as unknown as FakeCommandContext;
+
+		await api.commands.get("pisync")!.handler(undefined, ctx);
+
+		const menu = ui.renderedLines.join("\n");
+		expect(menu).toContain("Filter commands:");
+		expect(menu).toContain("→ Status");
+		expect(menu).not.toContain("→ Pull");
 	});
 
 	it("registers debug:clear-repo command", () => {

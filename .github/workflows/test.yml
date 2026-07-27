@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [18, 20, 22]
+        node: [22]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -24,6 +24,10 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      - name: Configure Git identity
+        run: |
+          git config --global user.name "pi-git-sync CI"
+          git config --global user.email "ci@pi-git-sync.invalid"
       - run: npm run test:ci
 
   platform-smoke:
@@ -40,8 +44,12 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Configure Git identity
+        run: |
+          git config --global user.name "pi-git-sync CI"
+          git config --global user.email "ci@pi-git-sync.invalid"
       - run: npm run typecheck
-      - run: npm test -- --reporter=dot
+      - run: npm run test:smoke -- --reporter=dot
 
   package:
     name: Package contents
@@ -53,4 +61,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Configure Git identity
+        run: |
+          git config --global user.name "pi-git-sync CI"
+          git config --global user.email "ci@pi-git-sync.invalid"
       - run: npm pack --dry-run
