@@ -56,7 +56,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/jachy-h/pi-git-sync/main/scr
 
 ### 3. 一键初始化
 
-在 Pi 中执行，提供你的仓库 URL 即可。pi-git-sync 会自动 clone、生成配置文件结构（scaffold）、提交并推送到远端。
+在 Pi 中执行，提供你的仓库 URL 即可。对于空仓库，pi-git-sync 会将发起初始化的机器作为配置来源：
+自动 clone、生成配置文件结构（scaffold）、捕获当前本地配置（包括 `settings.json` 与其中的
+`packages[]`），再提交并推送到远端。
 
 ```bash
 /pisync init git@github.com:<your-username>/<your-repo>.git
@@ -80,15 +82,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/jachy-h/pi-git-sync/main/scr
     └── themes/                # 主题
 ```
 
-### 4. 导入当前配置
+### 4. 同步后续变更
 
-首次使用，把当前本地配置导入仓库：
-
-```bash
-/pisync capture
-```
-
-然后提交并推送：
+首次 `/pisync init` 已会把当前本地配置捕获到空仓库。若旧版本留下默认 settings
+模板且同步基线为空，`/pisync push` 会识别并校准该特定状态，无需手工复制文件。后续修改后，执行：
 
 ```bash
 /pisync push

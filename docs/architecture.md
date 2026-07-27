@@ -549,7 +549,8 @@ flowchart TD
     
     J --> M["创建目录:<br/>sync/ + extensions/ skills/ prompts/ themes/"]
     M --> N["写入 pi-sync.json (v2)<br/>写入 sync/settings.json<br/>写入 .gitignore"]
-    N --> O["git commit + push"]
+    N --> C1["以脚手架创建临时基线<br/>capture 当前本地配置"]
+    C1 --> O["git commit + push"]
     O --> P{push 成功?}
     P -->|是| K
     P -->|否| Q["返回 warning<br/>scaffold 已 commit 本地"]

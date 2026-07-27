@@ -58,7 +58,10 @@ Set `PI_GIT_SYNC_VERSION` when a specific published version is required.
 
 ### 3. One-Click Init
 
-In Pi, provide your repo URL. pi-git-sync will clone, scaffold the config structure, commit and push automatically.
+In Pi, provide your repo URL. For an empty repo, pi-git-sync treats the initiating
+machine as the source of truth: it scaffolds the config structure, captures the current
+local configuration (including `settings.json` and its `packages[]`), then commits and
+pushes it automatically.
 
 ```bash
 /pisync init git@github.com:<your-username>/<your-repo>.git
@@ -82,21 +85,19 @@ Generated repo structure:
     └── themes/                # Themes
 ```
 
-### 4. Capture Current Config
+### 4. Sync Later Changes
 
-On first use, import your current local config into the repo:
-
-```bash
-/pisync capture
-```
-
-Then commit + push:
+The initial `/pisync init` already captures the current local configuration into an
+empty repository. If an older version left the generated settings placeholder with an
+empty sync baseline, `/pisync push` detects and calibrates that specific state without
+manual file copying. For changes made afterward, run:
 
 ```bash
 /pisync push
 ```
 
-The `push` command combines capture → commit → fetch → rebase → push → apply in one step, with a confirmation prompt after showing you the diff.
+The `push` command combines capture → commit → fetch → rebase → push → apply in one
+step, with a confirmation prompt after showing you the diff.
 
 ---
 
