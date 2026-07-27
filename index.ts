@@ -204,6 +204,11 @@ function notifyResult(
 	result: ClassifiedResult,
 	ctx: ExtensionCommandContext,
 ): void {
+	if (isManualMergeMessage(result.detail)) {
+		notifyManualMergeMessage(result.detail, ctx);
+		return;
+	}
+
 	if (result.kind === "detail") {
 		ctx.ui.notify(result.detail, "info");
 	} else if (result.kind === "success") {
@@ -502,10 +507,50 @@ async function requestPackageApproval(
 	};
 }
 
+const MANUAL_MERGE_HEADING =
+	"Merge the current-device branch into the shared branch:";
+
+function isManualMergeMessage(message: string): boolean {
+	return message.includes(MANUAL_MERGE_HEADING);
+}
+
+function formatManualMergeMessageForDisplay(
+	message: string,
+	theme: { fg(role: string, text: string): string },
+): string {
+	let inActionSection = false;
+
+	return message
+		.split("\n")
+		.map((line) => {
+			if (line === MANUAL_MERGE_HEADING) inActionSection = true;
+			if (line === "") return line;
+			return theme.fg(inActionSection ? "accent" : "text", line);
+		})
+		.join("\n");
+}
+
+function notifyManualMergeMessage(
+	message: string,
+	ctx: ExtensionCommandContext,
+): void {
+	// This is a recoverable state, not an extension error. Use an info
+	// notification so Pi does not prepend "Error:", while retaining the
+	// normal log in the text colour and highlighting the required next steps.
+	ctx.ui.notify(
+		formatManualMergeMessageForDisplay(message, ctx.ui.theme),
+		"info",
+	);
+}
+
 function notifyInitResult(
 	result: { message: string; ok: boolean; level: "info" | "warning" | "error" },
 	ctx: ExtensionCommandContext,
 ): void {
+	if (isManualMergeMessage(result.message)) {
+		notifyManualMergeMessage(result.message, ctx);
+		return;
+	}
 	ctx.ui.notify(result.message, result.level);
 }
 
@@ -579,7 +624,12 @@ async function handlePush(
 		return;
 	}
 	if (preparation.kind === "blocked") {
-		ctx.ui.notify(preparation.message ?? "Push blocked.", "error");
+		const message = preparation.message ?? "Push blocked.";
+		if (isManualMergeMessage(message)) {
+			notifyManualMergeMessage(message, ctx);
+		} else {
+			ctx.ui.notify(message, "error");
+		}
 		return;
 	}
 
@@ -644,7 +694,11 @@ async function handlePull(
 		return;
 	}
 
-	ctx.ui.notify(result.message, result.ok ? "info" : "error");
+	if (isManualMergeMessage(result.message)) {
+		notifyManualMergeMessage(result.message, ctx);
+	} else {
+		ctx.ui.notify(result.message, result.ok ? "info" : "error");
+	}
 
 	if (result.reload) {
 		await ctx.reload();
