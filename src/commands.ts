@@ -1061,12 +1061,20 @@ export class PiSyncCommands {
 
 			const newState = await loadState(this.agentDir);
 			const applyResult = await this.applyCurrent(rp, config, newState, "push");
-			const partial = /^(ERROR|Rollback failed)|Package errors:/m.test(
-				applyResult.message,
-			);
+			if (!applyResult.ok) {
+				return {
+					ok: false,
+					code: applyResult.code,
+					message:
+						"Push completed, but applying the synced configuration failed.\n" +
+						applyResult.message,
+					reload: false,
+				};
+			}
+
 			return {
-				ok: !partial,
-				code: partial ? "partial_failure" : "ok",
+				ok: true,
+				code: "ok",
 				message: `Pushed successfully.\n${applyResult.message}`,
 				reload: applyResult.reload,
 			};

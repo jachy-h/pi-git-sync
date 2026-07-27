@@ -357,7 +357,7 @@ describe.sequential("Extension push command interaction flow", () => {
 		});
 	});
 
-	it("push flow shows the diff and pushes immediately", async () => {
+	it("push flow omits the diff and pushes immediately", async () => {
 		await withTestEnvironment(async (environment) => {
 			const fixture = await createGitFixture(environment.rootDir);
 			await seedConfigRepo(fixture.deviceAPath);
@@ -389,7 +389,12 @@ describe.sequential("Extension push command interaction flow", () => {
 			await cmd.handler("push", ctx);
 
 			expect(ctx.ui.confirmCalls).toHaveLength(0);
-			expect(ctx.ui.notifications.length).toBeGreaterThan(0);
+			expect(
+				ctx.ui.notifications.some((notification) =>
+					notification.message.includes("Push ready:"),
+				),
+			).toBe(true);
+			expect(notificationTextOf(ctx)).not.toContain("diff --git");
 			expect(ctx.reloadCalls).toBe(1);
 		});
 	});

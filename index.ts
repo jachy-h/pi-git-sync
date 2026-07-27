@@ -151,7 +151,7 @@ function classifyResult(output: string, operation: string): ClassifiedResult {
 		const firstLine = output.split("\n")[0]!.trim();
 		return {
 			kind: "error",
-			summary: `${operation} failed: ${firstLine}`,
+			summary: firstLine,
 			detail: output,
 		};
 	}
@@ -575,7 +575,7 @@ async function handlePush(
 	ctx.ui.setStatus("pi-sync", undefined);
 
 	if (preparation.kind === "noop") {
-		ctx.ui.notify(preparation.message ?? "No changes to push.", "warning");
+		ctx.ui.notify(preparation.message ?? "No changes to push.", "info");
 		return;
 	}
 	if (preparation.kind === "blocked") {
@@ -584,9 +584,11 @@ async function handlePush(
 	}
 
 	ctx.ui.notify(
-		`${preparation.message ?? "Push ready."}\n\n` +
-			`Captured: ${preparation.capture.captured.length}, deleted: ${preparation.capture.deleted.length}\n\n` +
-			preparation.diff,
+		ctx.ui.theme.fg(
+			"text",
+			`${preparation.message ?? "Push ready."}\n` +
+				`Captured: ${preparation.capture.captured.length}, deleted: ${preparation.capture.deleted.length}`,
+		),
 		"info",
 	);
 

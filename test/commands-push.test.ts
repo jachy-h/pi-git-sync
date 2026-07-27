@@ -109,6 +109,59 @@ describe.sequential("PiSyncCommands.push", () => {
 		});
 	});
 
+	it("reports a failed apply without claiming the push failed", async () => {
+		await withTestEnvironment(async (environment) => {
+			const fixture = await createGitFixture(environment.rootDir);
+			await seedConfigRepo(fixture.deviceAPath);
+			await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
+			await runGit(fixture.deviceBPath, ["pull", "--ff-only"]);
+			await environment.writeAgentFile("prompts/welcome.md", "base\n");
+			await saveState(
+				environment.agentDir,
+				createSyncState({
+					repoPath: fixture.deviceBPath,
+					files: {
+						"prompts/welcome.md": { sha256: sha256("base\n"), mode: 0o644 },
+					},
+				}),
+			);
+			await environment.writeAgentFile("prompts/welcome.md", "updated\n");
+
+			const commands = new PiSyncCommands(environment.agentDir);
+			const preparation = await commands.preparePush(fixture.deviceBPath);
+			if (preparation.kind !== "ready") {
+				throw new Error("Expected push preparation to be ready");
+			}
+			(
+				commands as unknown as {
+					applyCurrent: () => Promise<{
+						ok: boolean;
+						code: "partial_failure";
+						message: string;
+						reload: boolean;
+					}>;
+				}
+			).applyCurrent = async () => ({
+				ok: false,
+				code: "partial_failure",
+				message: "ERROR: Simulated apply failure.",
+				reload: false,
+			});
+
+			const result = await commands.executePush(preparation);
+
+			expect(result).toMatchObject({
+				ok: false,
+				code: "partial_failure",
+				reload: false,
+				message: expect.stringContaining(
+					"Push completed, but applying the synced configuration failed.",
+				),
+			});
+			expect(result.message).not.toContain("Pushed successfully");
+		});
+	});
+
 	it("returns 'No changes to push' when there is nothing to capture", async () => {
 		await withTestEnvironment(async (environment) => {
 			const fixture = await createGitFixture(environment.rootDir);
