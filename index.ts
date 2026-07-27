@@ -136,6 +136,52 @@ interface ClassifiedResult {
 	detail: string;
 }
 
+/** A UI-agnostic notification payload for completed sync operations. */
+interface OperationNotification {
+	message: string;
+	level: "info" | "warning" | "error";
+}
+
+interface OperationNotificationSource {
+	message: string;
+	ok?: boolean;
+	code?: string;
+	level?: OperationNotification["level"];
+}
+
+function createOperationNotification(
+	result: OperationNotificationSource,
+): OperationNotification {
+	const message = result.message.startsWith("pi-git-sync: ")
+		? result.message
+		: `pi-git-sync: ${result.message}`;
+	if (result.level) return { message, level: result.level };
+	if (typeof result.ok === "boolean") {
+		return { message, level: result.ok ? "info" : "error" };
+	}
+	const classified = classifyResult(result.message, "Operation");
+	return {
+		message,
+		level: classified.kind === "error" ? "error" : "info",
+	};
+}
+
+function notifyOperationResult(
+	result: OperationNotificationSource,
+	ctx: ExtensionCommandContext,
+): void {
+	if (isManualMergeMessage(result.message)) {
+		notifyManualMergeMessage(result.message, ctx);
+		return;
+	}
+	const notification = createOperationNotification(result);
+	const color = notification.level === "info" ? "accent" : notification.level;
+	ctx.ui.notify(
+		ctx.ui.theme.fg(color, `◆ ${notification.message}`),
+		notification.level,
+	);
+}
+
 function classifyResult(output: string, operation: string): ClassifiedResult {
 	const lower = output.toLowerCase();
 
@@ -440,7 +486,7 @@ async function handleInit(
 
 		const details = result.details as { needsGitUrl?: boolean } | undefined;
 		if (!details?.needsGitUrl) {
-			notifyInitResult(result, ctx);
+			notifyOperationResult(result, ctx);
 			if (result.reload) await ctx.reload();
 			return;
 		}
@@ -475,7 +521,7 @@ async function handleInit(
 		initResult = await cmds.init(url, undefined, force, approval);
 	}
 
-	notifyInitResult(initResult, ctx);
+	notifyOperationResult(initResult, ctx);
 
 	if (initResult.reload) {
 		await ctx.reload();
@@ -543,17 +589,6 @@ function notifyManualMergeMessage(
 	);
 }
 
-function notifyInitResult(
-	result: { message: string; ok: boolean; level: "info" | "warning" | "error" },
-	ctx: ExtensionCommandContext,
-): void {
-	if (isManualMergeMessage(result.message)) {
-		notifyManualMergeMessage(result.message, ctx);
-		return;
-	}
-	ctx.ui.notify(result.message, result.level);
-}
-
 async function handleStatus(
 	cmds: PiSyncCommands,
 	ctx: ExtensionCommandContext,
@@ -608,8 +643,7 @@ async function handlePush(
 		ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Continuing push..."));
 		const result = await cmds.push(undefined, undefined, "--continue");
 		ctx.ui.setStatus("pi-sync", undefined);
-		const classified = classifyResult(result.message, "Push");
-		notifyResult(classified, ctx);
+		notifyOperationResult(result, ctx);
 		if (result.reload) await ctx.reload();
 		return;
 	}
@@ -620,16 +654,25 @@ async function handlePush(
 	ctx.ui.setStatus("pi-sync", undefined);
 
 	if (preparation.kind === "noop") {
-		ctx.ui.notify(preparation.message ?? "No changes to push.", "info");
+		notifyOperationResult(
+			{
+				message: preparation.message ?? "No changes to push.",
+				ok: true,
+				code: "noop",
+			},
+			ctx,
+		);
 		return;
 	}
 	if (preparation.kind === "blocked") {
-		const message = preparation.message ?? "Push blocked.";
-		if (isManualMergeMessage(message)) {
-			notifyManualMergeMessage(message, ctx);
-		} else {
-			ctx.ui.notify(message, "error");
-		}
+		notifyOperationResult(
+			{
+				message: preparation.message ?? "Push blocked.",
+				ok: false,
+				code: "blocked",
+			},
+			ctx,
+		);
 		return;
 	}
 
@@ -646,8 +689,7 @@ async function handlePush(
 	const result = await cmds.executePush(preparation);
 	ctx.ui.setStatus("pi-sync", undefined);
 
-	const classified = classifyResult(result.message, "Push");
-	notifyResult(classified, ctx);
+	notifyOperationResult(result, ctx);
 	if (result.reload) await ctx.reload();
 }
 
@@ -689,16 +731,7 @@ async function handlePull(
 		ctx.ui.setStatus("pi-sync", undefined);
 	}
 
-	if (result.code === "noop") {
-		ctx.ui.notify(result.message, "warning");
-		return;
-	}
-
-	if (isManualMergeMessage(result.message)) {
-		notifyManualMergeMessage(result.message, ctx);
-	} else {
-		ctx.ui.notify(result.message, result.ok ? "info" : "error");
-	}
+	notifyOperationResult(result, ctx);
 
 	if (result.reload) {
 		await ctx.reload();

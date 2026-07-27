@@ -29,7 +29,6 @@ import {
 	gitRebaseAbort,
 	gitCommit,
 	getHeadCommit,
-	isDiverged,
 	hasUnmergedPaths,
 	isWorktreeClean,
 	gitExec,
@@ -592,34 +591,63 @@ export class PiSyncCommands {
 				};
 			}
 
-			// 2. 检查 agent 是否有未捕获修改
+			// 2. Capture and commit agent-only changes before pulling so a pull does
+			// not fail merely because the current device has unsynced configuration.
 			const inventory = await compareFiles(this.agentDir, rp, config, state);
+			let capturedLocalChanges = false;
 			if (hasLocalChanges(inventory.comparisons)) {
-				const localChanges = inventory.comparisons
-					.filter(
-						(c) =>
-							c.changeType === "local_only" ||
-							c.changeType === "local_created" ||
-							c.changeType === "local_deleted",
-					)
-					.map((c) => `  ${c.relativePath}`)
-					.join("\n");
-				return {
-					ok: false,
-					code: "blocked_conflict",
-					message: `Local changes detected that have not been captured:\n${localChanges}\n\nRun /pisync push or /pisync capture first, or discard local changes.`,
-					reload: false,
-					details: {
-						localChanges: inventory.comparisons
-							.filter(
-								(c) =>
-									c.changeType === "local_only" ||
-									c.changeType === "local_created" ||
-									c.changeType === "local_deleted",
-							)
-							.map((c) => c.relativePath),
-					},
-				};
+				const capture = await this.captureWithScaffoldCalibration(
+					rp,
+					config,
+					state,
+					this.shouldRefreshLocalCapture(status, state),
+				);
+				if (capture.hasConflicts) {
+					try {
+						const branch = await this.preserveConflictOnDeviceBranch(
+							rp,
+							config,
+							state,
+						);
+						return {
+							ok: false,
+							code: "blocked_conflict",
+							message: this.formatManualMergeMessage(rp, config, branch),
+							reload: false,
+						};
+					} catch (error) {
+						return {
+							ok: false,
+							code: "git_failed",
+							message: `Could not preserve current-device conflict changes: ${error instanceof Error ? error.message : "Unknown error"}`,
+							reload: false,
+						};
+					}
+				}
+				if (capture.errors.length > 0 || capture.denied.length > 0) {
+					return {
+						ok: false,
+						code: "blocked_conflict",
+						message: `Pull blocked while capturing local changes.\n${[
+							...capture.errors.map(
+								(error) => `${error.file}: ${error.message}`,
+							),
+							...capture.denied.map((file) => `${file}: denied by sync policy`),
+						].join("\n")}`,
+						reload: false,
+					};
+				}
+				try {
+					await gitCommit(rp, "pi-sync: capture local changes before pull");
+					capturedLocalChanges = true;
+				} catch (error) {
+					return {
+						ok: false,
+						code: "git_failed",
+						message: `Could not commit local changes before pull: ${error instanceof Error ? error.message : "Unknown error"}`,
+						reload: false,
+					};
+				}
 			}
 
 			// 3. Fetch
@@ -634,20 +662,38 @@ export class PiSyncCommands {
 				};
 			}
 
-			// 4. 检查 divergence
-			const diverged = await isDiverged(
-				rp,
-				config.branch,
-				`origin/${config.branch}`,
-			);
-			if (diverged) {
-				return {
-					ok: false,
-					code: "blocked_conflict",
-					message:
-						"Local and remote branches have diverged. Resolve manually with git pull --rebase in the repo.",
-					reload: false,
-				};
+			// 4. A local capture creates a commit, so rebase it onto the fetched
+			// remote branch instead of attempting a fast-forward-only pull.
+			if (capturedLocalChanges) {
+				try {
+					const rebase = await gitRebase(rp, config.branch);
+					if (rebase.conflict) {
+						const branch = await this.preserveRebaseConflictOnDeviceBranch(
+							rp,
+							config,
+						);
+						return {
+							ok: false,
+							code: "blocked_conflict",
+							message: this.formatManualMergeMessage(rp, config, branch),
+							reload: false,
+						};
+					}
+				} catch (error) {
+					return {
+						ok: false,
+						code: "git_failed",
+						message: `Rebase failed after committing local changes: ${error instanceof Error ? error.message : "Unknown error"}`,
+						reload: false,
+					};
+				}
+				return await this.applyCurrent(
+					rp,
+					config,
+					await loadState(this.agentDir),
+					"pull",
+					packageApproval,
+				);
 			}
 
 			// 5. Pull (fast-forward only)
@@ -668,7 +714,7 @@ export class PiSyncCommands {
 				return {
 					ok: true,
 					code: "noop",
-					message: "Already up to date.",
+					message: "pi-git-sync: Already up to date.",
 					reload: false,
 				};
 			}
@@ -2006,7 +2052,7 @@ export class PiSyncCommands {
 			return {
 				ok: true,
 				code: "noop",
-				message: "Already up to date.",
+				message: "pi-git-sync: Already up to date.",
 				reload: false,
 			};
 		}

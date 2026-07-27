@@ -10,7 +10,7 @@ const manualMergeMessage = [
 	"Cloning git@github.com:example/pi-settings.git...",
 	"Clone complete.",
 	"Valid sync repo detected — fetching latest...",
-	"Already up to date.",
+	"pi-git-sync: Already up to date.",
 	"Sync conflict detected. The shared branch was left unchanged.",
 	"Current-device changes were saved to origin/pisync-device/test.",
 	"",

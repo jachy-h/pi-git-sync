@@ -395,6 +395,10 @@ describe.sequential("Extension push command interaction flow", () => {
 				),
 			).toBe(true);
 			expect(notificationTextOf(ctx)).not.toContain("diff --git");
+			expect(ctx.ui.notifications.at(-1)).toMatchObject({
+				message: expect.stringContaining("◆ pi-git-sync: Pushed successfully."),
+				level: "info",
+			});
 			expect(ctx.reloadCalls).toBe(1);
 		});
 	});
@@ -487,7 +491,10 @@ describe.sequential("Extension pull command interaction flow", () => {
 			const cmd = api.commands.get("pisync")!;
 			await cmd.handler("pull", ctx);
 
-			expect(ctx.ui.notifications.length).toBeGreaterThan(0);
+			expect(ctx.ui.notifications.at(-1)).toEqual({
+				message: "◆ pi-git-sync: Already up to date.",
+				level: "info",
+			});
 		});
 	});
 
