@@ -1,6 +1,6 @@
 # pi-git-sync
 
-通过 GitHub 私有仓库在多台机器之间同步 Pi 的配置。
+无论在哪里工作，都能带着你的 Pi 配置。
 
 [![npm](https://img.shields.io/npm/v/@jachy/pi-git-sync)](https://www.npmjs.com/package/@jachy/pi-git-sync)
 
@@ -8,34 +8,30 @@
 
 ---
 
-## 工作原理
+## 随身携带你的配置
 
-pi-git-sync 将你的 Pi 配置保存在一个**私有 Git 仓库**中，并在所有机器之间同步。它使用基于同步基线的**三方比较**模型，精准检测本地变更、远端变更和冲突。
+连接一个私有 GitHub 仓库后，它就会在不同机器之间承载你的 Pi 配置。扩展、技能、提示模板、主题、设置和 agent 指令都会在同一个位置。
 
-核心特性：
+第一台机器会捕获你现有的配置。换到另一台机器时，将 pi-git-sync 指向同一个仓库即可继续使用。
+配置有变动后，查看 diff，再通过一条 `/pisync push` 将变更带到其他机器。
 
-- 基于 Glob 的 include/exclude 白名单 — 无需手动逐文件映射
-- `settings.json` 作为完整文件共享 — 简单且可预期
-- 基于同步基线的三方 diff — 精准检测创建、删除和双边冲突
-- 完整 push 链：`capture → commit → fetch → rebase → push → apply`
-- 冲突时创建当前设备分支，并通过标准 Git merge 手动解决
-- 配置仓库是独立的 Git 仓库，不是 Pi Package
-- 所有同步内容统一存放在 `sync/` 目录下
+在后台，pi-git-sync 会将同步内容保存在 `sync/` 下，比对上次同步状态、本地变更和远端变更；
+同一文件在两个位置都有修改时，它会停下来等待你确认。
 
 ---
 
-## 使用方式
+## 开始使用
 
-### 前置条件
+### 使用前准备
 
 - Pi `0.82.1` 或更高版本（Node.js `>=22.19.0`）
 - Git 和 SSH 已配置（用于 GitHub）
 
-### 1. 在 GitHub 创建空私有仓库
+### 1. 创建私有仓库
 
-创建一个空的私有仓库（任意名称），**不要**勾选 "Initialize with README"。
+在 GitHub 创建一个空的私有仓库（名称任选），不要勾选 **Initialize with README**。
 
-### 2. 安装 pi-git-sync
+### 2. 在第一台机器安装 pi-git-sync
 
 ```bash
 pi install npm:@jachy/pi-git-sync
@@ -54,11 +50,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/jachy-h/pi-git-sync/main/scr
 
 package source 故意不带版本号，以便 Pi 只维护一份安装，避免出现重复的 `/pisync` 命令。
 
-### 3. 一键初始化
+### 3. 连接第一台机器
 
-在 Pi 中执行，提供你的仓库 URL 即可。对于空仓库，pi-git-sync 会将发起初始化的机器作为配置来源：
-自动 clone、生成配置文件结构（scaffold）、捕获当前本地配置（包括 `settings.json` 与其中的
-`packages[]`），再提交并推送到远端。
+在 Pi 中执行并提供仓库 URL。对于空仓库，pi-git-sync 会以当前机器作为起点：
+创建配置结构、捕获现有本地配置（包括 `settings.json` 及其中的 `packages[]`），然后提交并推送到远端。
 
 ```bash
 /pisync init git@github.com:<your-username>/<your-repo>.git
@@ -82,16 +77,26 @@ package source 故意不带版本号，以便 Pi 只维护一份安装，避免�
     └── themes/                # 主题
 ```
 
-### 4. 同步后续变更
+### 在新机器上继续使用
 
-首次 `/pisync init` 已会把当前本地配置捕获到空仓库。若旧版本留下默认 settings
-模板且同步基线为空，`/pisync push` 会识别并校准该特定状态，无需手工复制文件。后续修改后，执行：
+安装 pi-git-sync 后，使用已有仓库的 URL 执行同一条命令：
+
+```bash
+/pisync init git@github.com:<your-username>/<your-repo>.git
+```
+
+pi-git-sync 会获取仓库，并将其中的配置应用到这台 Pi 安装。
+
+### 分享后续变更
+
+修改配置后，执行：
 
 ```bash
 /pisync push
 ```
 
-`push` 命令会将 capture → commit → fetch → rebase → push → apply 合并为一步执行，在展示 diff 后需要确认。
+该命令会捕获你的变更、与远端仓库同步，并在请求确认前展示 diff。若旧版本留下默认 settings
+模板且同步基线为空，`/pisync push` 会识别并校准该状态，无需复制文件。
 
 ---
 

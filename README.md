@@ -1,6 +1,6 @@
 # pi-git-sync
 
-Sync Pi configuration across machines via a GitHub private repository.
+Keep your Pi setup with you, wherever you work.
 
 [![npm](https://img.shields.io/npm/v/@jachy/pi-git-sync)](https://www.npmjs.com/package/@jachy/pi-git-sync)
 
@@ -8,34 +8,35 @@ Sync Pi configuration across machines via a GitHub private repository.
 
 ---
 
-## How It Works
+## Your Setup, Wherever You Work
 
-pi-git-sync keeps your Pi configuration in a **private Git repository** and syncs it across all your machines. It uses a **three-way comparison** model based on a sync baseline to detect local changes, remote changes, and conflicts.
+Connect a private GitHub repository once and let it carry your Pi
+configuration between machines. Your extensions, skills, prompts, themes,
+settings, and agent instructions stay together in one place.
 
-Key features:
+The first machine captures what you already use. On another machine,
+point pi-git-sync at the same repository and pick up from there. When
+you make changes, review the diff, then share them with one `/pisync push`.
 
-- Glob-based include/exclude whitelist — no manual per-file mappings needed
-- `settings.json` shared as a whole file — simple and predictable
-- Three-way diff with sync baseline — accurate detection of creates, deletes, and bilateral conflicts
-- Full push chain: `capture → commit → fetch → rebase → push → apply`
-- Conflict-safe device branches with explicit manual Git merges
-- Config repo is a standalone Git repo, not a Pi Package
-- All synced content lives under a single `sync/` directory
+Behind the scenes, pi-git-sync keeps every synced item under `sync/`.
+It compares the last synced state with local and remote changes, then
+stops for your review when the same file changed in two places.
 
 ---
 
-## Usage
+## Get Started
 
-### Prerequisites
+### Before You Begin
 
 - Pi `0.82.1` or newer (Node.js `>=22.19.0`)
 - Git + SSH configured (for GitHub)
 
-### 1. Create an Empty Private Repo on GitHub
+### 1. Create a Private Repo
 
-Create an empty private repo (any name you like). Do **NOT** check "Initialize with README".
+Create an empty private repository on GitHub (any name you like). Leave
+**Initialize with README** unchecked.
 
-### 2. Install pi-git-sync
+### 2. Install pi-git-sync on Your First Machine
 
 ```bash
 pi install npm:@jachy/pi-git-sync
@@ -56,12 +57,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/jachy-h/pi-git-sync/main/scr
 
 The package source is intentionally unversioned. This lets Pi maintain one installation and prevents duplicate `/pisync` commands.
 
-### 3. One-Click Init
+### 3. Connect Your First Machine
 
-In Pi, provide your repo URL. For an empty repo, pi-git-sync treats the initiating
-machine as the source of truth: it scaffolds the config structure, captures the current
-local configuration (including `settings.json` and its `packages[]`), then commits and
-pushes it automatically.
+In Pi, provide your repository URL. For an empty repository, pi-git-sync uses
+this machine as the starting point: it creates the configuration structure,
+captures your current configuration (including `settings.json` and its
+`packages[]`), then commits and pushes it to the repository.
 
 ```bash
 /pisync init git@github.com:<your-username>/<your-repo>.git
@@ -85,19 +86,30 @@ Generated repo structure:
     └── themes/                # Themes
 ```
 
-### 4. Sync Later Changes
+### Bring a New Machine Onboard
 
-The initial `/pisync init` already captures the current local configuration into an
-empty repository. If an older version left the generated settings placeholder with an
-empty sync baseline, `/pisync push` detects and calibrates that specific state without
-manual file copying. For changes made afterward, run:
+Install pi-git-sync, then run the same command with your existing repository
+URL:
+
+```bash
+/pisync init git@github.com:<your-username>/<your-repo>.git
+```
+
+pi-git-sync fetches the repository and applies its configuration to that Pi
+installation.
+
+### Share Later Changes
+
+After changing your configuration, run:
 
 ```bash
 /pisync push
 ```
 
-The `push` command combines capture → commit → fetch → rebase → push → apply in one
-step, with a confirmation prompt after showing you the diff.
+The command captures your changes, syncs with the remote repository, and shows
+the diff before asking for confirmation. If an older version left a generated
+settings placeholder with an empty sync baseline, `/pisync push` recognizes and
+calibrates that state without file copying.
 
 ---
 
