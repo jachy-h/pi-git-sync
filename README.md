@@ -45,18 +45,6 @@ pi install npm:@jachy/pi-git-sync
 The config repository is user data, not a Pi package. Do not run `pi install` on the
 config repository itself.
 
-### Optional Bootstrap
-
-The bootstrap script installs the extension and then tells Pi to run `init`; it does
-not clone or install the config repository as code:
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/jachy-h/pi-git-sync/main/scripts/bootstrap.sh) \
-  git@github.com:<your-username>/<your-repo>.git
-```
-
-The package source is intentionally unversioned. This lets Pi maintain one installation and prevents duplicate `/pisync` commands.
-
 ### 3. Connect Your First Machine
 
 In Pi, provide your repository URL. For an empty repository, pi-git-sync uses

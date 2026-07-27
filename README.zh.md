@@ -39,17 +39,6 @@ pi install npm:@jachy/pi-git-sync
 
 配置仓库是用户数据，不是 Pi Package。不要对配置仓库本身执行 `pi install`。
 
-### 可选 Bootstrap
-
-Bootstrap 脚本只安装扩展，然后提示 Pi 执行 `init`；不会把配置仓库 clone 后当作代码安装：
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/jachy-h/pi-git-sync/main/scripts/bootstrap.sh) \
-  git@github.com:<your-username>/<your-repo>.git
-```
-
-package source 故意不带版本号，以便 Pi 只维护一份安装，避免出现重复的 `/pisync` 命令。
-
 ### 3. 连接第一台机器
 
 在 Pi 中执行并提供仓库 URL。对于空仓库，pi-git-sync 会以当前机器作为起点：
