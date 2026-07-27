@@ -1,9 +1,10 @@
-# v0.2 Upgrade Guide
+# v0.3 Upgrade Guide
 
 ## Scope
 
-This guide covers upgrades from `0.1.x` to `0.2.x`. The config repository layout remains
-compatible, but the local sync state changes from schema v2 to schema v3.
+This guide covers upgrades from `0.2.x` (and older compatible state) to `0.3.x`.
+The config repository and local state schemas remain compatible; the public command API
+changes to a single setup/sync entry point.
 
 ## Before upgrading
 
@@ -25,11 +26,25 @@ On the first command that loads state, pi-git-sync:
 6. Atomically writes the migrated v3 state.
 
 A migration conflict is intentionally not resolved automatically. Use `/pisync status`,
-resolve the file manually, then run `/pisync push` or `/pisync pull` as appropriate.
+resolve the file manually, then run `/pisync` again.
+
+## Command migration
+
+The following write commands are removed in v0.3 and are not aliases:
+
+- `/pisync init [url]`
+- `/pisync pull`
+- `/pisync push`
+- `/pisync push --continue`
+
+Run `/pisync` instead. On an uninitialized machine it asks for the Git URL and performs
+setup. On an initialized machine it runs the complete pull-then-push flow. `/pisync status`
+and `/pisync diff` remain read-only diagnostic commands. Existing pending conflict and
+apply-failed operations are recovered by the next `/pisync` invocation.
 
 ## Branch behavior
 
-`pi-sync.json.branch` is now the single target branch for init, status, pull, push, and
+`pi-sync.json.branch` is now the single target branch for setup, status, sync, and
 rebase. The tool no longer infers the target from the current branch or assumes `main`.
 A clean worktree may be switched to the configured branch. Dirty, merge, and rebase states
 are blocked instead of being switched automatically.
@@ -64,11 +79,7 @@ pi install npm:@jachy/pi-git-sync
 ```
 
 It does not install the config repository as a Pi package and does not clone the repository
-itself. After installation, run:
-
-```text
-/pisync init <repo-url>
-```
+itself. After installation, run `/pisync` and enter the repository URL when prompted.
 
 Bootstrap removes any versioned legacy source before installing this unversioned source, preventing duplicate `/pisync` commands.
 
@@ -91,4 +102,4 @@ npm audit --audit-level=high
 ```
 
 Then run `/pisync status` and confirm that the configured branch, repository path, and
-pending operation state are healthy.
+pending operation state are healthy. Finally run `/pisync` to verify the complete sync flow.

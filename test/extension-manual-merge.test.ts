@@ -25,19 +25,17 @@ const manualMergeMessage = [
 
 vi.mock("../src/commands.ts", () => ({
 	PiSyncCommands: class {
-		async init() {
+		async run() {
 			return {
 				code: "blocked_conflict",
-				level: "error" as const,
 				message: manualMergeMessage,
-				needsReload: false,
+				mode: "sync" as const,
+				phase: "pull" as const,
 				ok: false,
 				reload: false,
 			};
 		}
 	},
-	getAgentDir: () => "/tmp/agent",
-	getRepoPathSafe: async () => "/tmp/config-repo",
 }));
 
 const { default: extension } = await import("../index.ts");
@@ -55,9 +53,7 @@ describe("manual merge guidance", () => {
 		const ctx = new FakeCommandContext("rpc");
 		ctx.ui = new StyledFakeUi();
 
-		await api.commands
-			.get("pisync")!
-			.handler("init git@github.com:example/pi-settings.git", ctx);
+		await api.commands.get("pisync")!.handler(undefined, ctx);
 
 		const notification = ctx.ui.notifications.at(-1);
 		expect(notification).toMatchObject({ level: "info" });

@@ -15,8 +15,9 @@ configuration between machines. Your extensions, skills, prompts, themes,
 settings, and agent instructions stay together in one place.
 
 The first machine captures what you already use. On another machine,
-point pi-git-sync at the same repository and pick up from there. When
-you make changes, review the diff, then share them with one `/pisync push`.
+point pi-git-sync at the same repository and pick up from there. Run
+`/pisync` on any device for the complete sync: remote changes are pulled
+first, then local changes are captured and pushed.
 
 Behind the scenes, pi-git-sync keeps every synced item under `sync/`.
 It compares the last synced state with local and remote changes, then
@@ -47,14 +48,10 @@ config repository itself.
 
 ### 3. Connect Your First Machine
 
-In Pi, provide your repository URL. For an empty repository, pi-git-sync uses
-this machine as the starting point: it creates the configuration structure,
-captures your current configuration (including `settings.json` and its
-`packages[]`), then commits and pushes it to the repository.
-
-```bash
-/pisync init git@github.com:<your-username>/<your-repo>.git
-```
+Run `/pisync` in Pi. When prompted, enter your repository URL. For an empty
+repository, pi-git-sync uses this machine as the starting point: it creates the
+configuration structure, captures your current configuration (including
+`settings.json` and its `packages[]`), then commits and pushes it to the repository.
 
 Generated repo structure:
 
@@ -76,28 +73,21 @@ Generated repo structure:
 
 ### Bring a New Machine Onboard
 
-Install pi-git-sync, then run the same command with your existing repository
-URL:
-
-```bash
-/pisync init git@github.com:<your-username>/<your-repo>.git
-```
-
-pi-git-sync fetches the repository and applies its configuration to that Pi
-installation.
+Install pi-git-sync, then run `/pisync` and enter your existing repository URL
+when prompted. pi-git-sync fetches the repository and applies its configuration
+to that Pi installation.
 
 ### Share Later Changes
 
 After changing your configuration, run:
 
 ```bash
-/pisync push
+/pisync
 ```
 
-The command captures your changes, syncs with the remote repository, and shows
-the diff before asking for confirmation. If an older version left a generated
-settings placeholder with an empty sync baseline, `/pisync push` recognizes and
-calibrates that state without file copying.
+The command pulls remote changes first, then captures and pushes local changes.
+It also recognizes older generated settings placeholders with an empty sync
+baseline and calibrates that state without file copying.
 
 ---
 
@@ -105,13 +95,9 @@ calibrates that state without file copying.
 
 | Command | Description |
 | --- | --- |
-| `/pisync` | Interactive TUI menu |
-| `/pisync init [url]` | Initialize or clone a config repo (`--force` to rebuild) |
+| `/pisync` | Set up or run complete pull-then-push sync |
 | `/pisync status` | Show detailed sync status (three-way comparison + git info) |
 | `/pisync diff` | Show pending changes between agent and repo |
-| `/pisync pull` | Pull remote changes and apply to agent |
-| `/pisync push` | Capture, commit, and push local changes |
-| `/pisync push --continue` | Continue push after resolving rebase conflicts |
 
 ---
 
@@ -173,7 +159,7 @@ Also: hidden files (except `.gitignore`) are excluded. Symlinks and symlink comp
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `schemaVersion` | `2` | — | Config schema version (currently `2`) |
-| `branch` | `string` | `"main"` | The single Git branch used by init, status, pull, push, and rebase |
+| `branch` | `string` | `"main"` | The single Git branch used by setup, status, sync, and rebase |
 | `root` | `string` | `"sync"` | Root directory inside the repo for synced content |
 | `include` | `string[]` | — | Glob whitelist (relative to `root`). Supports `*`, `**`, `?` |
 | `exclude` | `string[]` | `[]` | Glob patterns to exclude (lower priority than built-in hard deny) |
@@ -298,10 +284,10 @@ npm audit --audit-level=high
 
 ### Upgrade Notes
 
-When upgrading from `0.1.x`, keep the existing config repository and run the normal
-`/pisync init <repo-url>` or `/pisync pull` flow. The local sync state migrates from
-schema v2 to v3 after backing up the old state. Equal local/repo files are reconciled;
-conflicting files are preserved and reported instead of choosing a side.
+When upgrading from `0.2.x` (or an older compatible state), keep the existing config repository and run `/pisync`.
+The local sync state migrates from schema v2 to v3 after backing up the old state.
+Equal local/repo files are reconciled; conflicting files are preserved and reported
+instead of choosing a side.
 
 See [the full upgrade guide](./docs/upgrade.md).
 
@@ -315,7 +301,7 @@ pi-git-sync/
 ├── scripts/
 │   └── bootstrap.sh      # Bootstrap script for new machines
 ├── src/
-│   ├── commands.ts        # /pisync command routing + push/pull/init flows
+│   ├── commands.ts        # /pisync command routing + unified sync flow
 │   ├── config.ts          # pi-sync.json loading & validation
 │   ├── git.ts             # Git operations (status, fetch, pull, push, rebase)
 │   ├── inventory.ts       # Three-way file comparison (baseline vs local vs remote)

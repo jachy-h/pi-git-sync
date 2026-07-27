@@ -142,7 +142,7 @@ export function formatSyncStatusV2(input: SyncStatusV2Input): string {
 				? "    git rebase --continue"
 				: '    git commit -m "resolve conflicts"',
 		);
-		lines.push("  Then run /pisync pull or /pisync push to finish syncing.");
+		lines.push("  Then run /pisync again to finish syncing.");
 	}
 
 	// Managed (synced)
@@ -438,14 +438,12 @@ export function formatCaptureResult(result: CaptureResult): string {
 		lines.push("");
 		lines.push("To resolve:");
 		lines.push(
-			"  - Keep remote version: copy the file from the repo to your agent, then run /pisync pull",
+			"  - Keep remote version: copy the file from the repo to your agent, then run /pisync",
 		);
 		lines.push(
-			"  - Keep local version:  copy the file from your agent to the repo, then run /pisync push",
+			"  - Keep local version:  copy the file from your agent to the repo, then run /pisync",
 		);
-		lines.push(
-			"  - Or manually merge the two versions, then run /pisync push or /pisync pull",
-		);
+		lines.push("  - Or manually merge the two versions, then run /pisync");
 		lines.push("");
 		lines.push(boldRed("Conflicts:"));
 		for (const c of result.conflicts) {

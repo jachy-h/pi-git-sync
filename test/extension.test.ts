@@ -63,36 +63,6 @@ class RpcFakeUi extends FakeUi {
 	}
 }
 
-class FilterableMenuFakeUi extends FakeUi {
-	renderedLines: string[] = [];
-
-	async custom<T>(renderer: unknown): Promise<T | undefined> {
-		const menuTheme = { ...this.theme, bold: (text: string) => text };
-		const createComponent = renderer as (
-			tui: { requestRender: () => void },
-			theme: {
-				fg: (role: string, text: string) => string;
-				bold: (text: string) => string;
-			},
-			keybindings: unknown,
-			done: (value?: T) => void,
-		) => {
-			render: (width: number) => string[];
-			handleInput?: (data: string) => void;
-		};
-		const component = createComponent(
-			{ requestRender: () => {} },
-			menuTheme,
-			undefined,
-			() => {},
-		);
-
-		for (const key of ["s", "t", "a"]) component.handleInput?.(key);
-		this.renderedLines = component.render(120);
-		return undefined;
-	}
-}
-
 function createRpcContext(): FakeCommandContext {
 	const ctx = new FakeCommandContext("rpc");
 	const rpcUi = new RpcFakeUi();
@@ -153,53 +123,36 @@ describe("Extension registration", () => {
 		const cmd = api.commands.get("pisync");
 		expect(cmd).toBeDefined();
 		expect(cmd!.description).toBeDefined();
+		expect(cmd!.description).not.toMatch(/init|pull|push/);
 		expect(typeof cmd!.handler).toBe("function");
 	});
 
-	it("filters pisync subcommands as the user types an argument", () => {
+	it("only completes the read-only status and diff arguments", () => {
 		const api = new FakeExtensionApi();
 		register(api);
 
 		const completions = api.commands
 			.get("pisync")!
-			.getArgumentCompletions?.("pu");
+			.getArgumentCompletions?.("");
 
 		expect(completions).toEqual([
 			{
-				value: "pull",
-				label: "pull",
-				description: "Pull and apply remote changes",
+				value: "status",
+				label: "status",
+				description: "Show detailed sync status",
 			},
 			{
-				value: "push",
-				label: "push",
-				description: "Commit and push local changes",
+				value: "diff",
+				label: "diff",
+				description: "Show pending changes before sync",
 			},
 		]);
 		expect(
-			api.commands.get("pisync")!.getArgumentCompletions?.("unknown"),
+			api.commands.get("pisync")!.getArgumentCompletions?.("pull"),
 		).toBeNull();
 		expect(
-			api.commands.get("pisync")!.getArgumentCompletions?.("init "),
+			api.commands.get("pisync")!.getArgumentCompletions?.("init"),
 		).toBeNull();
-	});
-
-	it("filters commands typed into the /pisync menu", async () => {
-		const api = new FakeExtensionApi();
-		register(api);
-		const ui = new FilterableMenuFakeUi();
-		const ctx = {
-			mode: "tui",
-			ui,
-			reload: async () => {},
-		} as unknown as FakeCommandContext;
-
-		await api.commands.get("pisync")!.handler(undefined, ctx);
-
-		const menu = ui.renderedLines.join("\n");
-		expect(menu).toContain("Filter commands:");
-		expect(menu).toContain("→ Status");
-		expect(menu).not.toContain("→ Pull");
 	});
 
 	it("registers debug:clear-repo command", () => {
@@ -241,48 +194,49 @@ describe("Extension registration", () => {
 });
 
 describe("pisync command routing", () => {
-	it("routes empty/unknown subcommand to the menu (non-interactive mode)", async () => {
+	it("dispatches no arguments to setup or sync instead of opening a menu", async () => {
 		const api = new FakeExtensionApi();
 		register(api);
 		const ctx = createRpcContext();
-		// Provide a select response so the menu can complete
-		ctx.ui.selectResponses = ["status"];
 
 		const cmd = api.commands.get("pisync")!;
-		await cmd.handler("unknown", ctx);
+		await cmd.handler(undefined, ctx);
 
-		// The menu selects "status" and appends the result without opening a modal.
-		expect(notificationTextOf(ctx)).toContain("No config repo");
-		expect(showOutputOf(ctx)).toBe("");
+		expect(ctx.ui.selectCalls).toHaveLength(0);
+		expect(ctx.ui.inputCalls).toHaveLength(1);
+		expect(notificationTextOf(ctx)).toContain("Setup cancelled.");
 	});
 
-	it("does not advertise or route capture as a subcommand", async () => {
+	it("rejects unknown arguments without side effects", async () => {
 		const api = new FakeExtensionApi();
 		register(api);
 		const ctx = createRpcContext();
-		ctx.ui.selectResponses = ["status"];
 
-		const cmd = api.commands.get("pisync")!;
-		expect(cmd.description).not.toContain("capture");
-		await cmd.handler("capture", ctx);
+		await api.commands.get("pisync")!.handler("unknown", ctx);
 
-		expect(ctx.ui.selectCalls[0]?.options).not.toContain("capture");
-		expect(notificationTextOf(ctx)).toContain("No config repo");
+		expect(ctx.ui.selectCalls).toHaveLength(0);
+		expect(ctx.ui.inputCalls).toHaveLength(0);
+		expect(notificationTextOf(ctx)).toContain(
+			"This command was removed in v0.3.",
+		);
 	});
 
-	it("does not advertise or route rollback as a subcommand", async () => {
-		const api = new FakeExtensionApi();
-		register(api);
-		const ctx = createRpcContext();
-		ctx.ui.selectResponses = ["status"];
+	it.each(["init", "pull", "push", "push --continue"])(
+		"rejects the removed %s command without side effects",
+		async (removedCommand) => {
+			const api = new FakeExtensionApi();
+			register(api);
+			const ctx = createRpcContext();
 
-		const cmd = api.commands.get("pisync")!;
-		expect(cmd.description).not.toContain("rollback");
-		await cmd.handler("rollback", ctx);
+			await api.commands.get("pisync")!.handler(removedCommand, ctx);
 
-		expect(ctx.ui.selectCalls[0]?.options).not.toContain("rollback");
-		expect(notificationTextOf(ctx)).toContain("No config repo");
-	});
+			expect(ctx.ui.selectCalls).toHaveLength(0);
+			expect(ctx.ui.inputCalls).toHaveLength(0);
+			expect(notificationTextOf(ctx)).toContain(
+				"This command was removed in v0.3.",
+			);
+		},
+	);
 
 	it("routes to status subcommand", async () => {
 		const api = new FakeExtensionApi();
@@ -308,93 +262,40 @@ describe("pisync command routing", () => {
 		expect(showOutputOf(ctx)).toContain("No config repo");
 	});
 
-	it("does not advertise or route doctor as a subcommand", async () => {
+	it("rejects arbitrary unknown arguments without side effects", async () => {
 		const api = new FakeExtensionApi();
 		register(api);
 		const ctx = createRpcContext();
-		ctx.ui.selectResponses = ["status"];
 
-		const cmd = api.commands.get("pisync")!;
-		expect(cmd.description).not.toContain("doctor");
-		await cmd.handler("doctor", ctx);
+		await api.commands.get("pisync")!.handler("doctor", ctx);
 
-		expect(ctx.ui.selectCalls[0]?.options).not.toContain("doctor");
-		expect(notificationTextOf(ctx)).toContain("No config repo");
+		expect(ctx.ui.selectCalls).toHaveLength(0);
+		expect(ctx.ui.inputCalls).toHaveLength(0);
+		expect(notificationTextOf(ctx)).toContain(
+			"This command was removed in v0.3.",
+		);
 	});
 
-	it("routes init without URL and notifies guidance", async () => {
+	it("uses setup terminology when the initial URL input is cancelled", async () => {
 		const api = new FakeExtensionApi();
 		register(api);
 		const ctx = createRpcContext();
-		// Provide an input response to simulate user entering a URL
-		// Without input, the handler waits for input then cancels if none given
-		// We'll test the guidance path: when no URL is given and no input, it cancels
-		// But first let's test that with input it proceeds
-		(ctx.ui as unknown as RpcFakeUi).inputResponses = [
-			"git@github.com:test/pi-config.git",
-		];
 
-		const cmd = api.commands.get("pisync")!;
-		await cmd.handler("init", ctx);
+		await api.commands.get("pisync")!.handler(undefined, ctx);
 
-		// Should have some notification (either guidance or init attempt)
-		expect(ctx.ui.notifications.length).toBeGreaterThan(0);
+		expect(ctx.ui.notifications).toContainEqual(
+			expect.objectContaining({ message: "Setup cancelled." }),
+		);
 	});
 
-	it("notifies 'Init cancelled' when input is empty", async () => {
+	it("does not reload when setup input is cancelled", async () => {
 		const api = new FakeExtensionApi();
 		register(api);
 		const ctx = createRpcContext();
-		// No input responses provided → input() returns undefined → cancelled
 
-		const cmd = api.commands.get("pisync")!;
-		await cmd.handler("init", ctx);
+		await api.commands.get("pisync")!.handler(undefined, ctx);
 
-		expect(
-			ctx.ui.notifications.some((n) => n.message.includes("Init cancelled")),
-		).toBe(true);
-	});
-
-	it("parses --force flag from init args", async () => {
-		const api = new FakeExtensionApi();
-		register(api);
-		const ctx = createRpcContext();
-		// Provide input so init proceeds (albeit failing since no real git remote)
-		(ctx.ui as unknown as RpcFakeUi).inputResponses = ["invalid-url"];
-
-		const cmd = api.commands.get("pisync")!;
-		await cmd.handler("init --force", ctx);
-
-		// Should attempt init with the invalid URL
-		expect(ctx.ui.notifications.length).toBeGreaterThan(0);
-		// The notification should mention the invalid URL error
-		const joined = ctx.ui.notifications.map((n) => n.message).join("\n");
-		expect(joined.length).toBeGreaterThan(0);
-	});
-
-	it("routes push --continue subcommand", async () => {
-		await withTestEnvironment(async (environment) => {
-			const fixture = await createGitFixture(environment.rootDir);
-			await seedConfigRepo(fixture.deviceBPath);
-			await saveState(
-				environment.agentDir,
-				createSyncState({
-					repoPath: fixture.deviceBPath,
-				}),
-			);
-
-			const api = new FakeExtensionApi();
-			register(api);
-			const ctx = createRpcContext();
-
-			const cmd = api.commands.get("pisync")!;
-			await cmd.handler("push --continue", ctx);
-
-			// Should show "No pending push operation to continue"
-			expect(ctx.ui.notifications.length).toBeGreaterThan(0);
-			const joined = ctx.ui.notifications.map((n) => n.message).join("\n");
-			expect(joined).toContain("No pending push operation");
-		});
+		expect(ctx.reloadCalls).toBe(0);
 	});
 
 	it("trims extra whitespace from args", async () => {
@@ -457,7 +358,7 @@ describe.sequential("Extension push command interaction flow", () => {
 			const ctx = createRpcContext();
 
 			const cmd = api.commands.get("pisync")!;
-			await cmd.handler("push", ctx);
+			await cmd.handler(undefined, ctx);
 
 			expect(ctx.ui.confirmCalls).toHaveLength(0);
 			expect(ctx.ui.notifications.length).toBeGreaterThan(0);
@@ -493,17 +394,15 @@ describe.sequential("Extension push command interaction flow", () => {
 			const ctx = createRpcContext();
 
 			const cmd = api.commands.get("pisync")!;
-			await cmd.handler("push", ctx);
+			await cmd.handler(undefined, ctx);
 
 			expect(ctx.ui.confirmCalls).toHaveLength(0);
-			expect(
-				ctx.ui.notifications.some((notification) =>
-					notification.message.includes("Push ready:"),
-				),
-			).toBe(true);
+			expect(notificationTextOf(ctx)).toContain(
+				"Push: No worktree changes; synchronized ahead commits",
+			);
 			expect(notificationTextOf(ctx)).not.toContain("diff --git");
 			expect(ctx.ui.notifications.at(-1)).toMatchObject({
-				message: expect.stringContaining("◆ pi-git-sync: Pushed successfully."),
+				message: expect.stringContaining("◆ pi-git-sync: Sync completed."),
 				level: "info",
 			});
 			expect(ctx.reloadCalls).toBe(1);
@@ -540,7 +439,7 @@ describe.sequential("Extension push command interaction flow", () => {
 			ctx.ui.confirmResponses = [true];
 
 			const cmd = api.commands.get("pisync")!;
-			await cmd.handler("push", ctx);
+			await cmd.handler(undefined, ctx);
 
 			expect(ctx.reloadCalls).toBe(1);
 		});
@@ -550,10 +449,18 @@ describe.sequential("Extension push command interaction flow", () => {
 		await withTestEnvironment(async (environment) => {
 			const fixture = await createGitFixture(environment.rootDir);
 			await seedConfigRepo(fixture.deviceBPath);
+			const settings = JSON.stringify({ packages: ["npm:@jachy/pi-git-sync"] });
+			await environment.writeAgentFile("prompts/welcome.md", "base\n");
+			await environment.writeAgentFile("settings.json", settings);
+			const { sha256 } = await import("../src/inventory.ts");
 			await saveState(
 				environment.agentDir,
 				createSyncState({
 					repoPath: fixture.deviceBPath,
+					files: {
+						"prompts/welcome.md": { sha256: sha256("base\n"), mode: 0o644 },
+						"settings.json": { sha256: sha256(settings), mode: 0o644 },
+					},
 				}),
 			);
 
@@ -563,7 +470,7 @@ describe.sequential("Extension push command interaction flow", () => {
 			ctx.ui.confirmResponses = [true];
 
 			const cmd = api.commands.get("pisync")!;
-			await cmd.handler("push", ctx);
+			await cmd.handler(undefined, ctx);
 
 			// No changes = reload false
 			expect(ctx.reloadCalls).toBe(0);
@@ -581,12 +488,15 @@ describe.sequential("Extension pull command interaction flow", () => {
 
 			const { sha256 } = await import("../src/inventory.ts");
 			await environment.writeAgentFile("prompts/welcome.md", "base\n");
+			const settings = JSON.stringify({ packages: ["npm:@jachy/pi-git-sync"] });
+			await environment.writeAgentFile("settings.json", settings);
 			await saveState(
 				environment.agentDir,
 				createSyncState({
 					repoPath: fixture.deviceBPath,
 					files: {
 						"prompts/welcome.md": { sha256: sha256("base\n"), mode: 0o644 },
+						"settings.json": { sha256: sha256(settings), mode: 0o644 },
 					},
 				}),
 			);
@@ -596,12 +506,11 @@ describe.sequential("Extension pull command interaction flow", () => {
 			const ctx = createRpcContext();
 
 			const cmd = api.commands.get("pisync")!;
-			await cmd.handler("pull", ctx);
+			await cmd.handler(undefined, ctx);
 
-			expect(ctx.ui.notifications.at(-1)).toEqual({
-				message: "◆ pi-git-sync: Already up to date.",
-				level: "info",
-			});
+			expect(ctx.ui.notifications.at(-1)?.message).toContain(
+				"Pull: pi-git-sync: Already up to date.",
+			);
 		});
 	});
 
@@ -645,7 +554,7 @@ describe.sequential("Extension pull command interaction flow", () => {
 			const ctx = createRpcContext();
 			ctx.ui.confirmResponses = [true];
 
-			await api.commands.get("pisync")!.handler("pull", ctx);
+			await api.commands.get("pisync")!.handler(undefined, ctx);
 
 			expect(ctx.ui.confirmCalls[0]?.title).toContain(
 				"Approve package installation",
@@ -687,7 +596,7 @@ describe.sequential("Extension pull command interaction flow", () => {
 			const ctx = createRpcContext();
 			ctx.ui.confirmResponses = [false];
 
-			await api.commands.get("pisync")!.handler("pull", ctx);
+			await api.commands.get("pisync")!.handler(undefined, ctx);
 
 			await expect(
 				readFile(join(environment.agentDir, "settings.json"), "utf-8"),

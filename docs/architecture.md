@@ -1,6 +1,6 @@
 # pi-git-sync 架构与逻辑文档
 
-> 版本：0.2.x（config schema v2，state schema v3）  
+> 版本：0.3.x（config schema v2，state schema v3）
 > 最后更新：2026-07-27
 
 ## 目录
@@ -338,7 +338,7 @@ stateDiagram-v2
     CaptureDone --> Pushed: push 成功
     Pushed --> Idle: apply + updateState
     Pushed --> ConflictState: rebase 冲突
-    ConflictState --> Pushed: git rebase --continue<br/>+ /pisync push --continue
+    ConflictState --> Pushed: git rebase --continue<br/>+ /pisync
     ConflictState --> Idle: git rebase --abort<br/>+ /pisync status
 ```
 
@@ -390,7 +390,7 @@ sequenceDiagram
     participant G as Git (local)
     participant O as Origin (remote)
 
-    Note over A,O: /pisync push
+    Note over A,O: /pisync（统一同步）
 
     A->>R: ① capture<br/>agent 变更 → repo 工作树
     R->>R: ② 校验白名单内容<br/>validateFiles()
@@ -404,7 +404,7 @@ sequenceDiagram
         
         alt rebase 冲突
             G-->>A: ⚠ 停止！记录 pendingOperation
-            Note over A,O: 用户手动解决冲突<br/>git add + rebase --continue<br/>/pisync push --continue
+            Note over A,O: 用户手动解决冲突<br/>git add + rebase --continue<br/>再次执行 /pisync
         else rebase 成功
             G->>O: ⑦ git push origin/<config.branch>
             O-->>G: push OK
@@ -428,7 +428,7 @@ sequenceDiagram
     participant R as Repo
     participant O as Origin
 
-    Note over A,O: /pisync pull
+    Note over A,O: /pisync（统一同步）
 
     A->>A: ① acquire lock
     
@@ -529,7 +529,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["/pisync init [url]"] --> B{仓库已存在?}
+    A["/pisync（首次 setup）"] --> B{仓库已存在?}
     B -->|是| C{--force?}
     C -->|是| D["rm -rf repo<br/>重新 clone"]
     C -->|否| E["fetch + pull<br/>apply 当前配置<br/>返回 'Already initialized'"]
@@ -559,7 +559,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["/pisync push --continue"] --> B{state.pendingOperation<br/>== 'push-rebase-conflict'?}
+    A["/pisync（自动 recovery）"] --> B{state.pendingOperation<br/>== 'push-rebase-conflict'?}
     B -->|否| C["返回 'No pending operation'"]
     B -->|是| D[acquire lock]
     D --> E{hasUnmergedPaths?}
@@ -682,13 +682,9 @@ graph LR
 
 | 命令 | 锁 | 网络 | 副作用 | 说明 |
 | ------ | :--: | :----: | :------: | ------ |
-| `/pisync` | - | - | - | TUI 交互菜单 |
-| `/pisync init [url]` | ✅ | ✅ | clone/commit/push/apply/reload | 初始化或克隆配置仓库 |
+| `/pisync` | ✅ | ✅ | setup/recovery/pull/push/apply/reload | 首次 setup 或完整双向同步 |
 | `/pisync status` | - | - | - | 显示三方比较 + git 状态 |
 | `/pisync diff` | - | 可选 | - | 显示各类差异 |
-| `/pisync pull` | ✅ | ✅ | fetch/ff/apply/reload | 拉取远端变更 |
-| `/pisync push` | ✅ | ✅ | capture/commit/rebase/push/apply/reload | 推送本地变更 |
-| `/pisync push --continue` | ✅ | ✅ | validate/scan/push/apply/reload | 继续冲突解决后的推送 |
 | `debug:clear-repo` | ✅ | ✅ | 清空本地+远端/reload | 🔴 仅调试用 |
 
 ## 附录 C: 数据流总览

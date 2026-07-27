@@ -13,7 +13,7 @@
 连接一个私有 GitHub 仓库后，它就会在不同机器之间承载你的 Pi 配置。扩展、技能、提示模板、主题、设置和 agent 指令都会在同一个位置。
 
 第一台机器会捕获你现有的配置。换到另一台机器时，将 pi-git-sync 指向同一个仓库即可继续使用。
-配置有变动后，查看 diff，再通过一条 `/pisync push` 将变更带到其他机器。
+在任意设备执行 `/pisync` 完成完整同步：先拉取远端变更，再捕获并推送本地变更。
 
 在后台，pi-git-sync 会将同步内容保存在 `sync/` 下，比对上次同步状态、本地变更和远端变更；
 同一文件在两个位置都有修改时，它会停下来等待你确认。
@@ -41,12 +41,8 @@ pi install npm:@jachy/pi-git-sync
 
 ### 3. 连接第一台机器
 
-在 Pi 中执行并提供仓库 URL。对于空仓库，pi-git-sync 会以当前机器作为起点：
+在 Pi 中执行 `/pisync`，按提示输入仓库 URL。对于空仓库，pi-git-sync 会以当前机器作为起点：
 创建配置结构、捕获现有本地配置（包括 `settings.json` 及其中的 `packages[]`），然后提交并推送到远端。
-
-```bash
-/pisync init git@github.com:<your-username>/<your-repo>.git
-```
 
 生成的仓库结构：
 
@@ -68,12 +64,7 @@ pi install npm:@jachy/pi-git-sync
 
 ### 在新机器上继续使用
 
-安装 pi-git-sync 后，使用已有仓库的 URL 执行同一条命令：
-
-```bash
-/pisync init git@github.com:<your-username>/<your-repo>.git
-```
-
+安装 pi-git-sync 后，执行 `/pisync` 并按提示输入已有仓库 URL。
 pi-git-sync 会获取仓库，并将其中的配置应用到这台 Pi 安装。
 
 ### 分享后续变更
@@ -81,11 +72,11 @@ pi-git-sync 会获取仓库，并将其中的配置应用到这台 Pi 安装。
 修改配置后，执行：
 
 ```bash
-/pisync push
+/pisync
 ```
 
-该命令会捕获你的变更、与远端仓库同步，并在请求确认前展示 diff。若旧版本留下默认 settings
-模板且同步基线为空，`/pisync push` 会识别并校准该状态，无需复制文件。
+该命令会先拉取远端变更，再捕获并推送本地变更。若旧版本留下默认 settings
+模板且同步基线为空，`/pisync` 会识别并校准该状态，无需复制文件。
 
 ---
 
@@ -93,13 +84,9 @@ pi-git-sync 会获取仓库，并将其中的配置应用到这台 Pi 安装。
 
 | 命令 | 说明 |
 | --- | --- |
-| `/pisync` | TUI 交互菜单 |
-| `/pisync init [url]` | 初始化或克隆配置仓库（`--force` 强制重建） |
+| `/pisync` | 首次 setup 或执行完整的先拉取后推送同步 |
 | `/pisync status` | 显示详细同步状态（三方比较 + Git 信息） |
 | `/pisync diff` | 显示 agent 与仓库之间的待处理变更 |
-| `/pisync pull` | 拉取远端变更并应用到 agent |
-| `/pisync push` | 捕获、提交并推送本地变更 |
-| `/pisync push --continue` | 解决 rebase 冲突后继续推送 |
 
 ---
 
@@ -161,7 +148,7 @@ pi-git-sync 会获取仓库，并将其中的配置应用到这台 Pi 安装。
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `schemaVersion` | `2` | — | 配置 schema 版本（当前为 `2`） |
-| `branch` | `string` | `"main"` | init、status、pull、push、rebase 统一使用的唯一 Git 分支 |
+| `branch` | `string` | `"main"` | setup、status、同步和 rebase 统一使用的唯一 Git 分支 |
 | `root` | `string` | `"sync"` | 仓库中同步内容的根目录 |
 | `include` | `string[]` | — | Glob 白名单（相对于 `root`）。支持 `*`、`**`、`?` |
 | `exclude` | `string[]` | `[]` | Glob 排除列表（优先级低于内置 hard deny） |
@@ -284,9 +271,8 @@ npm audit --audit-level=high
 
 ### 升级说明
 
-从 `0.1.x` 升级时保留现有配置仓库，执行正常的 `/pisync init <repo-url>` 或
-`/pisync pull` 流程。本地同步 state 会在备份旧文件后从 schema v2 迁移到 v3。
-本地与仓库一致的文件会自动收敛；冲突文件会保留现状并报告，不会自动选边。
+从 `0.2.x`（或更早的兼容 state）升级时保留现有配置仓库，执行 `/pisync`。本地同步 state 会在备份旧文件后从
+schema v2 迁移到 v3。本地与仓库一致的文件会自动收敛；冲突文件会保留现状并报告，不会自动选边。
 
 详见[完整升级指南](./docs/upgrade.md)。
 
@@ -300,7 +286,7 @@ pi-git-sync/
 ├── scripts/
 │   └── bootstrap.sh      # 新机器引导脚本
 ├── src/
-│   ├── commands.ts        # /pisync 命令路由 + push/pull/init 流程
+│   ├── commands.ts        # /pisync 命令路由 + 统一同步流程
 │   ├── config.ts          # pi-sync.json 加载与校验
 │   ├── git.ts             # Git 操作（status、fetch、pull、push、rebase）
 │   ├── inventory.ts       # 三方文件比较（基线 vs 本地 vs 远端）

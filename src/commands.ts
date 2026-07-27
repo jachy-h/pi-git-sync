@@ -45,7 +45,13 @@ import { SyncLock } from "./lock.ts";
 import { scanSecrets } from "./security.ts";
 import { ensureDeviceId, loadState, saveState, updateState } from "./state.ts";
 import type { SyncState } from "./state.ts";
-import type { CommandResult, ResultCode } from "./operation-result.ts";
+import type {
+	CommandResult,
+	ResultCode,
+	RunOptions,
+	RunResult,
+	SyncPhase,
+} from "./operation-result.ts";
 import { captureChanges } from "./capture.ts";
 import { compareFiles, hasLocalChanges, sha256 } from "./inventory.ts";
 import { validateFiles } from "./validate.ts";
@@ -93,9 +99,7 @@ export async function getRepoPath(configOverride?: string): Promise<string> {
 	if (state.repoPath && existsSync(state.repoPath)) {
 		return state.repoPath;
 	}
-	throw new Error(
-		"No config repo found. Use /pisync init <git-url> to set up.",
-	);
+	throw new Error("No config repo found. Run /pisync to set up.");
 }
 
 /**
@@ -167,6 +171,11 @@ export interface PushPreparation {
 	message?: string;
 }
 
+export type LifecycleState =
+	| { kind: "uninitialized" }
+	| { kind: "initialized"; repoPath: string; state: SyncState }
+	| { kind: "broken"; reason: string; repoPath?: string };
+
 interface InitInternalResult {
 	message: string;
 	needsReload: boolean;
@@ -216,10 +225,247 @@ function resultFromPreparation(preparation: PushPreparation): CommandResult {
 export class PiSyncCommands {
 	private agentDir: string;
 	private lock: SyncLock;
+	private orchestrationLockHeld = false;
 
 	constructor(agentDir?: string) {
 		this.agentDir = agentDir ?? getAgentDir();
 		this.lock = new SyncLock(join(this.agentDir, ".pi-sync"));
+	}
+
+	/**
+	 * Inspect local lifecycle state without treating a damaged repository as a
+	 * fresh installation. This is the single state decision point for `run()`.
+	 */
+	async inspectLifecycleState(): Promise<LifecycleState> {
+		const state = await loadState(this.agentDir);
+		const defaultPath = join(this.agentDir, "..", "config-repo");
+
+		if (!state.repoPath) {
+			return existsSync(defaultPath)
+				? {
+						kind: "broken",
+						reason:
+							"A config repository exists, but local sync state is missing.",
+						repoPath: defaultPath,
+					}
+				: { kind: "uninitialized" };
+		}
+
+		if (!existsSync(state.repoPath)) {
+			return {
+				kind: "broken",
+				reason: "Sync state points to a repository that no longer exists.",
+				repoPath: state.repoPath,
+			};
+		}
+		if (!existsSync(join(state.repoPath, ".git"))) {
+			return {
+				kind: "broken",
+				reason: "The configured repository is missing its .git directory.",
+				repoPath: state.repoPath,
+			};
+		}
+		if (!existsSync(join(state.repoPath, "pi-sync.json"))) {
+			return {
+				kind: "broken",
+				reason: "The configured repository is missing pi-sync.json.",
+				repoPath: state.repoPath,
+			};
+		}
+
+		try {
+			await loadPiSyncConfig(state.repoPath);
+		} catch (error) {
+			return {
+				kind: "broken",
+				reason:
+					error instanceof Error
+						? `The configured repository has an invalid pi-sync.json: ${error.message}`
+						: "The configured repository has an invalid pi-sync.json.",
+				repoPath: state.repoPath,
+			};
+		}
+
+		return { kind: "initialized", repoPath: state.repoPath, state };
+	}
+
+	private emitProgress(
+		onProgress: RunOptions["onProgress"],
+		phase: SyncPhase,
+		message: string,
+	): void {
+		onProgress?.(phase, message);
+	}
+
+	private async recoverPendingInternal(
+		lifecycle: Extract<LifecycleState, { kind: "initialized" }>,
+		options: RunOptions,
+	): Promise<CommandResult> {
+		const pending = lifecycle.state.pendingOperation;
+		if (!pending) {
+			return {
+				ok: true,
+				code: "noop",
+				message: "No recovery required.",
+				reload: false,
+			};
+		}
+		if (pending.type === "push-rebase-conflict") {
+			return await this.push(lifecycle.repoPath, undefined, "--continue");
+		}
+		if (pending.type === "apply-failed") {
+			return await this.apply(lifecycle.repoPath, options.packageApproval);
+		}
+		return {
+			ok: false,
+			code: "partial_failure",
+			message: `Unknown pending operation "${String((pending as { type?: unknown }).type)}". Resolve it manually before syncing.`,
+			reload: false,
+		};
+	}
+
+	private async syncInternal(
+		repoPath: string,
+		options: RunOptions,
+		initialReload = false,
+	): Promise<RunResult> {
+		this.emitProgress(options.onProgress, "pull", "Pulling remote changes...");
+		const pull = await this.pull(repoPath, options.packageApproval);
+		if (!pull.ok || pull.code === "approval_required") {
+			const pullDetails =
+				typeof pull.details === "object" && pull.details !== null
+					? (pull.details as { packages?: unknown })
+					: undefined;
+			return {
+				...pull,
+				mode: "sync",
+				phase: pull.code === "approval_required" ? "apply" : "pull",
+				reload: initialReload || pull.reload,
+				details: {
+					pull,
+					packages: Array.isArray(pullDetails?.packages)
+						? pullDetails.packages
+						: undefined,
+				},
+			};
+		}
+
+		this.emitProgress(options.onProgress, "push", "Pushing local changes...");
+		const push = await this.push(repoPath);
+		const code = !push.ok
+			? push.code
+			: pull.code === "noop" && push.code === "noop"
+				? "noop"
+				: "ok";
+		return {
+			ok: push.ok,
+			code,
+			message:
+				`Sync ${push.ok ? "completed" : "incomplete"}.\n` +
+				`Pull: ${pull.message}\nPush: ${push.message}`,
+			reload: initialReload || pull.reload || push.reload,
+			mode: "sync",
+			phase: "complete",
+			details: { pull, push },
+		};
+	}
+
+	/** Run setup, recovery, or the complete pull-then-push synchronization. */
+	async run(options: RunOptions = {}): Promise<RunResult> {
+		this.emitProgress(
+			options.onProgress,
+			"preflight",
+			"Checking sync state...",
+		);
+		const lifecycle = await this.inspectLifecycleState();
+
+		if (lifecycle.kind === "broken") {
+			return {
+				ok: false,
+				code: "partial_failure",
+				message: `Sync state is damaged: ${lifecycle.reason}`,
+				reload: false,
+				mode: "sync",
+				phase: "preflight",
+				details: { reason: lifecycle.reason },
+			};
+		}
+
+		if (lifecycle.kind === "uninitialized") {
+			if (!options.gitUrl) {
+				return {
+					ok: false,
+					code: "blocked_validation",
+					message: "Enter your config repo Git URL to get started.",
+					reload: false,
+					mode: "setup",
+					phase: "preflight",
+					details: { needsGitUrl: true },
+				};
+			}
+			const setup = await this.init(
+				options.gitUrl,
+				(message) =>
+					this.emitProgress(options.onProgress, "preflight", message),
+				false,
+				options.packageApproval,
+			);
+			return {
+				...setup,
+				mode: "setup",
+				phase: setup.ok ? "complete" : "preflight",
+				details:
+					typeof setup.details === "object" && setup.details !== null
+						? (setup.details as RunResult["details"])
+						: undefined,
+			};
+		}
+
+		const acquired = await this.lock.acquire("sync", 5000);
+		if (!acquired) {
+			return {
+				ok: false,
+				code: "partial_failure",
+				message: "Another sync operation is in progress.",
+				reload: false,
+				mode: "sync",
+				phase: "preflight",
+			};
+		}
+
+		this.orchestrationLockHeld = true;
+		try {
+			let recoveryReload = false;
+			if (lifecycle.state.pendingOperation) {
+				this.emitProgress(
+					options.onProgress,
+					"preflight",
+					"Recovering pending operation...",
+				);
+				const recovery = await this.recoverPendingInternal(lifecycle, options);
+				recoveryReload = recovery.reload;
+				if (!recovery.ok || recovery.code === "approval_required") {
+					return {
+						...recovery,
+						mode: "recovery",
+						phase:
+							recovery.code === "approval_required" ? "apply" : "preflight",
+						details:
+							typeof recovery.details === "object" && recovery.details !== null
+								? (recovery.details as RunResult["details"])
+								: undefined,
+					};
+				}
+			}
+			return await this.syncInternal(
+				lifecycle.repoPath,
+				options,
+				recoveryReload,
+			);
+		} finally {
+			this.orchestrationLockHeld = false;
+			await this.lock.release();
+		}
 	}
 
 	// ========== 冲突分支 ==========
@@ -423,8 +669,7 @@ export class PiSyncCommands {
 
 	async status(repoPath?: string): Promise<string> {
 		const rp = repoPath ?? (await getRepoPathSafe(this.agentDir));
-		if (!rp)
-			return "No config repo configured. Use /pisync init <git-url> first.";
+		if (!rp) return "No config repo configured. Run /pisync to set up first.";
 
 		const config = await loadPiSyncConfig(rp);
 		const status = await gitStatus(rp, config.branch);
@@ -456,8 +701,7 @@ export class PiSyncCommands {
 
 	async diff(repoPath?: string): Promise<string> {
 		const rp = repoPath ?? (await getRepoPathSafe(this.agentDir));
-		if (!rp)
-			return "No config repo configured. Use /pisync init <git-url> first.";
+		if (!rp) return "No config repo configured. Run /pisync to set up first.";
 
 		const config = await loadPiSyncConfig(rp);
 		const status = await gitStatus(rp, config.branch);
@@ -517,7 +761,8 @@ export class PiSyncCommands {
 		const config = await loadPiSyncConfig(rp);
 		const state = await loadState(this.agentDir);
 
-		const acquired = await this.lock.acquire("apply", 5000);
+		const acquired =
+			this.orchestrationLockHeld || (await this.lock.acquire("apply", 5000));
 		if (!acquired) {
 			return {
 				ok: false,
@@ -549,7 +794,7 @@ export class PiSyncCommands {
 				packageApproval,
 			);
 		} finally {
-			await this.lock.release();
+			if (!this.orchestrationLockHeld) await this.lock.release();
 		}
 	}
 
@@ -563,7 +808,8 @@ export class PiSyncCommands {
 		const config = await loadPiSyncConfig(rp);
 		const state = await loadState(this.agentDir);
 
-		const acquired = await this.lock.acquire("pull", 5000);
+		const acquired =
+			this.orchestrationLockHeld || (await this.lock.acquire("pull", 5000));
 		if (!acquired) {
 			return {
 				ok: false,
@@ -631,6 +877,15 @@ export class PiSyncCommands {
 			// 2. Capture and commit agent-only changes before pulling so a pull does
 			// not fail merely because the current device has unsynced configuration.
 			const inventory = await compareFiles(this.agentDir, rp, config, state);
+			const hasRemoteChanges = inventory.comparisons.some((comparison) =>
+				[
+					"remote_only",
+					"remote_created",
+					"remote_deleted",
+					"local_deleted_remote_modified",
+					"converged",
+				].includes(comparison.changeType),
+			);
 			let capturedLocalChanges = false;
 			if (hasLocalChanges(inventory.comparisons)) {
 				const capture = await this.captureWithScaffoldCalibration(
@@ -775,7 +1030,7 @@ export class PiSyncCommands {
 			if (!pulled) {
 				// A previous pull may have fast-forwarded before package approval was
 				// granted. Re-run apply so approval can complete without another pull.
-				if (packageApproval || switchedBranch) {
+				if (packageApproval || switchedBranch || hasRemoteChanges) {
 					return await this.applyCurrent(
 						rp,
 						config,
@@ -801,7 +1056,7 @@ export class PiSyncCommands {
 				packageApproval,
 			);
 		} finally {
-			await this.lock.release();
+			if (!this.orchestrationLockHeld) await this.lock.release();
 		}
 	}
 
@@ -824,7 +1079,9 @@ export class PiSyncCommands {
 			conflicts: [],
 		};
 
-		const acquired = await this.lock.acquire("push-prepare", 5000);
+		const acquired =
+			this.orchestrationLockHeld ||
+			(await this.lock.acquire("push-prepare", 5000));
 		if (!acquired) {
 			return {
 				kind: "blocked",
@@ -1097,7 +1354,7 @@ export class PiSyncCommands {
 				message: `Push ready: ${changedFiles.length} changed file(s).`,
 			};
 		} finally {
-			await this.lock.release();
+			if (!this.orchestrationLockHeld) await this.lock.release();
 		}
 	}
 
@@ -1108,7 +1365,8 @@ export class PiSyncCommands {
 	): Promise<CommandResult> {
 		if (preparation.kind !== "ready") return resultFromPreparation(preparation);
 
-		const acquired = await this.lock.acquire("push", 5000);
+		const acquired =
+			this.orchestrationLockHeld || (await this.lock.acquire("push", 5000));
 		if (!acquired) {
 			return {
 				ok: false,
@@ -1263,7 +1521,7 @@ export class PiSyncCommands {
 				reload: applyResult.reload,
 			};
 		} finally {
-			await this.lock.release();
+			if (!this.orchestrationLockHeld) await this.lock.release();
 		}
 	}
 
@@ -1271,33 +1529,54 @@ export class PiSyncCommands {
 		repoPath?: string,
 		message?: string,
 		subCommand?: string,
-	): Promise<{ message: string; reload: boolean }> {
-		if (subCommand === "--continue") return this.pushContinue(repoPath);
+	): Promise<CommandResult> {
+		if (subCommand === "--continue") {
+			const result = await this.pushContinue(repoPath);
+			const successful = result.message.includes("continued successfully");
+			return {
+				ok: successful,
+				code: successful ? "ok" : "partial_failure",
+				message: result.message,
+				reload: result.reload,
+			};
+		}
 		const preparation = await this.preparePush(repoPath);
 		if (preparation.kind === "noop") {
 			try {
+				const status = await gitStatus(preparation.repoPath);
+				const hasAheadCommit = status.ahead > 0;
 				await this.pushMainAndDeviceBranches(
 					preparation.repoPath,
 					preparation.branch,
 				);
 				return {
-					message:
-						preparation.message ??
-						"No changes to push. Main and device branches are synchronized.",
+					ok: true,
+					code: hasAheadCommit ? "ok" : "noop",
+					message: hasAheadCommit
+						? "No worktree changes; synchronized ahead commits to shared and device branches."
+						: (preparation.message ??
+							"No changes to push. Main and device branches are synchronized."),
 					reload: false,
 				};
 			} catch (error) {
 				return {
+					ok: false,
+					code: "git_failed",
 					message: `Could not synchronize main and device branches: ${error instanceof Error ? error.message : "Unknown error"}`,
 					reload: false,
 				};
 			}
 		}
 		if (preparation.kind !== "ready") {
-			return { message: preparation.message ?? "Push blocked.", reload: false };
+			return {
+				ok: false,
+				code: "blocked_conflict",
+				message: preparation.message ?? "Push blocked.",
+				reload: false,
+			};
 		}
 		const result = await this.executePush(preparation, message);
-		return { message: result.message, reload: result.reload };
+		return result;
 	}
 
 	/**
@@ -1317,7 +1596,9 @@ export class PiSyncCommands {
 			};
 		}
 
-		const acquired = await this.lock.acquire("push-continue", 5000);
+		const acquired =
+			this.orchestrationLockHeld ||
+			(await this.lock.acquire("push-continue", 5000));
 		if (!acquired) {
 			return {
 				message: "Another sync operation is in progress.",
@@ -1399,7 +1680,7 @@ export class PiSyncCommands {
 				reload: applyResult.reload,
 			};
 		} finally {
-			await this.lock.release();
+			if (!this.orchestrationLockHeld) await this.lock.release();
 		}
 	}
 
@@ -1428,8 +1709,7 @@ export class PiSyncCommands {
 		if (!gitUrl) {
 			return normalizeInitResult({
 				message:
-					"Enter your config repo Git URL to get started:\n" +
-					"  /pisync init git@github.com:you/pi-config.git",
+					"Run /pisync and enter your config repo Git URL to get started.",
 				needsReload: false,
 				ok: false,
 				code: "blocked_validation",
@@ -1583,7 +1863,7 @@ export class PiSyncCommands {
 								`A config repo already exists at ${defaultPath}\n` +
 								`Existing remote: ${existingUrl}\nProvided URL:   ${gitUrl}\n` +
 								"To switch, remove the existing repo first: rm -rf ~/.pi/config-repo\n" +
-								`Or use: /pisync init --force ${gitUrl}`,
+								"Run /pisync after removing or repairing the existing repository.",
 							needsReload: false,
 							ok: false,
 							level: "error",
@@ -1746,7 +2026,7 @@ export class PiSyncCommands {
 						message:
 							`${lines.join("\n")}\n\n` +
 							"Scaffold committed locally but could not be pushed.\n" +
-							"Resolve the remote issue, then run /pisync push.\n" +
+							"Resolve the remote issue, then run /pisync.\n" +
 							`Details: ${detail}`,
 						needsReload: false,
 						ok: false,
@@ -1760,7 +2040,7 @@ export class PiSyncCommands {
 						`The repository at ${gitUrl} has commits but is not a valid pi-sync config repo.\n` +
 						"A pi-sync config repo must have a pi-sync.json at its root.\n" +
 						"Either use an empty repository for auto-scaffolding, or ensure the repo contains a valid pi-sync.json file.\n\n" +
-						`To force rebuild this repository, use: /pisync init --force ${gitUrl}`,
+						"Repair or replace the repository, then run /pisync again.",
 					needsReload: false,
 					ok: false,
 					level: "error",

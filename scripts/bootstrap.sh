@@ -92,7 +92,7 @@ if ! pi install "${PI_GIT_SYNC_PACKAGE}"; then
 	exit 1
 fi
 
-# 6. 配置仓库的 clone、分支选择和 state 初始化由 /pisync init 负责。
+# 6. 配置仓库的 clone、分支选择和 state 初始化由 /pisync 负责。
 # 这样它们会使用 pi-sync.json 中的 branch，而不是 bootstrap 的硬编码分支。
 # 7. 提示下一步
 echo ""
@@ -102,6 +102,6 @@ info "============================================"
 info ""
 info "Next steps:"
 info "  1. Start pi"
-info "  2. Run /pisync init ${REPO_URL}"
-info "  3. Run /pisync pull to apply config"
+info "  2. Run /pisync and enter the repository URL when prompted"
+info "  3. Run /pisync again on any other device to pull then push changes"
 info ""

@@ -35,7 +35,7 @@ export class SyncLock {
 
 		while (true) {
 			// Always create the full lock path. The agent directory may not exist yet
-			// during the first `/pisync init` invocation.
+			// during the first `/pisync` invocation.
 			const lockDir = join(this.lockPath, "..");
 			await mkdir(lockDir, { recursive: true });
 

@@ -1,5 +1,5 @@
 /**
- * pi-git-sync Extension (v2)
+ * pi-git-sync Extension (v3)
  *
  * 通过 Git 私有仓库在多台机器之间同步 Pi 配置。
  *
@@ -9,42 +9,22 @@
  * - settings.json 整文件共享，不做 managed-key merge
  * - 基于同步基线的三方比较
  * - 完整 push 链：capture → commit → fetch → rebase → push → apply
- * - push --continue 冲突处理
+ * - 统一 run() 编排 setup/recovery/pull/push
  *
  * 命令：
- *   /pisync              - TUI 操作菜单
- *   /pisync init [url]   - 初始化配置仓库
+ *   /pisync              - 初始化或执行双向同步
  *   /pisync status       - 显示详情状态
  *   /pisync diff         - 显示差异
- *   /pisync pull         - 从远端拉取并应用
- *   /pisync push         - 捕获、提交并推送
  */
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder } from "@earendil-works/pi-coding-agent";
-import {
-	Container,
-	Input,
-	type SelectItem,
-	SelectList,
-	Text,
-} from "@earendil-works/pi-tui";
-import {
-	PiSyncCommands,
-	getRepoPathSafe,
-	getAgentDir,
-} from "./src/commands.ts";
-import { gitStatus } from "./src/git.ts";
-import { loadPiSyncConfig } from "./src/config.ts";
+import type { SelectItem } from "@earendil-works/pi-tui";
+import { PiSyncCommands } from "./src/commands.ts";
+import type { RunOptions } from "./src/operation-result.ts";
 
 const pisyncSubcommands: SelectItem[] = [
-	{
-		value: "init",
-		label: "init",
-		description: "Initialize or clone a config repo",
-	},
 	{
 		value: "status",
 		label: "status",
@@ -54,16 +34,6 @@ const pisyncSubcommands: SelectItem[] = [
 		value: "diff",
 		label: "diff",
 		description: "Show pending changes before sync",
-	},
-	{
-		value: "pull",
-		label: "pull",
-		description: "Pull and apply remote changes",
-	},
-	{
-		value: "push",
-		label: "push",
-		description: "Commit and push local changes",
 	},
 ];
 
@@ -115,40 +85,25 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("pisync", {
-		description:
-			"Sync Pi configuration via Git repository (init|status|diff|pull|push)",
+		description: "Set up or sync Pi configuration via Git",
 		getArgumentCompletions: getPiSyncArgumentCompletions,
 		async handler(args, ctx) {
-			const parts = args?.trim().split(/\s+/) ?? [];
-			const subCommand = parts[0];
-			const subArgs = parts.slice(1).join(" ");
-
-			switch (subCommand) {
-				case "init": {
-					const initArgs = parts.slice(1);
-					const force = initArgs.includes("--force");
-					const initUrl = initArgs
-						.filter((a) => a !== "--force")
-						.join(" ")
-						.trim();
-					await handleInit(cmds, initUrl || undefined, ctx, force);
+			switch (args?.trim()) {
+				case "":
+				case undefined:
+					await handlePiSync(cmds, ctx);
 					break;
-				}
 				case "status":
 					await handleStatus(cmds, ctx);
 					break;
 				case "diff":
 					await handleDiff(cmds, ctx);
 					break;
-				case "pull":
-					await handlePull(cmds, ctx);
-					break;
-				case "push":
-					await handlePush(cmds, subArgs || undefined, ctx);
-					break;
 				default:
-					await showMenu(cmds, ctx);
-					break;
+					ctx.ui.notify(
+						"This command was removed in v0.3. Run /pisync to set up or sync.",
+						"warning",
+					);
 			}
 		},
 	});
@@ -274,249 +229,61 @@ function classifyResult(output: string, operation: string): ClassifiedResult {
 	return { kind: "detail", summary: "", detail: output };
 }
 
-// ========== TUI 菜单 ==========
-
-async function showMenu(
-	cmds: PiSyncCommands,
-	ctx: ExtensionCommandContext,
-): Promise<void> {
-	const choice = await getMenuChoice(ctx);
-	if (!choice) return;
-
-	await executeMenuChoice(choice, cmds, ctx);
-}
-
-async function getMenuChoice(
-	ctx: ExtensionCommandContext,
-): Promise<string | null> {
-	const menuOptions = pisyncSubcommands.map((command) => ({
-		...command,
-		label: command.label.charAt(0).toUpperCase() + command.label.slice(1),
-	}));
-
-	const summary = await getRepoSummary();
-
-	if (ctx.mode === "tui") {
-		return showTuiMenu(menuOptions, summary, ctx);
-	}
-
-	if (ctx.mode === "rpc") {
-		return showRpcMenu(menuOptions, summary, ctx);
-	}
-
-	const lines = [
-		`pi-git-sync${summary}`,
-		"Available commands: /pisync init|status|diff|pull|push",
-	];
-	ctx.ui.notify(lines.join("\n"), "info");
-	return null;
-}
-
-async function showTuiMenu(
-	options: Array<{ value: string; label: string }>,
-	summary: string,
-	ctx: ExtensionCommandContext,
-): Promise<string | null> {
-	const items: SelectItem[] = options.map((opt) => ({
-		...opt,
-		description: pisyncSubcommands.find(
-			(command) => command.value === opt.value,
-		)?.description,
-	}));
-
-	return ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-		const container = new Container();
-
-		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-
-		const title = `pi-git-sync${summary}`;
-		container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
-		container.addChild(
-			new Text(theme.fg("dim", "Sync Pi configuration via Git (v2)"), 1, 0),
-		);
-
-		const selectList = new SelectList(items, Math.min(items.length, 10), {
-			selectedPrefix: (t: string) => theme.fg("accent", t),
-			selectedText: (t: string) => theme.fg("accent", t),
-			description: (t: string) => theme.fg("muted", t),
-			scrollInfo: (t: string) => theme.fg("dim", t),
-			noMatch: (t: string) => theme.fg("warning", t),
-		});
-		selectList.onSelect = (item) => done(item.value);
-		selectList.onCancel = () => done(null);
-
-		const filterInput = new Input();
-		container.addChild(new Text(theme.fg("dim", "Filter commands:"), 1, 0));
-		container.addChild(filterInput);
-		container.addChild(selectList);
-
-		container.addChild(
-			new Text(
-				theme.fg(
-					"dim",
-					"Type to filter • ↑↓ navigate • enter select • esc cancel",
-				),
-				1,
-				0,
-			),
-		);
-
-		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-
-		return {
-			render: (w: number) => container.render(w),
-			invalidate: () => container.invalidate(),
-			handleInput: (data: string) => {
-				const previousFilter = filterInput.getValue();
-				filterInput.handleInput(data);
-				if (filterInput.getValue() !== previousFilter) {
-					selectList.setFilter(filterInput.getValue());
-				}
-				selectList.handleInput(data);
-				tui.requestRender();
-			},
-		};
-	});
-}
-
-async function showRpcMenu(
-	options: Array<{ value: string; label: string }>,
-	summary: string,
-	ctx: ExtensionCommandContext,
-): Promise<string | null> {
-	const result = await ctx.ui.select(
-		`pi-git-sync${summary}`,
-		options.map((opt) => opt.value),
-	);
-	return result ?? null;
-}
-
-async function getRepoSummary(): Promise<string> {
-	try {
-		const rp = await getRepoPathSafe(getAgentDir());
-		if (!rp) return "";
-
-		const config = await loadPiSyncConfig(rp);
-		const repoStatus = await gitStatus(rp, config.branch);
-		let s = ` [${repoStatus.commitShort}`;
-		if (repoStatus.remoteExists && repoStatus.behind > 0) {
-			s += ` ↓${repoStatus.behind}`;
-		}
-		if (repoStatus.ahead > 0) {
-			s += ` ↑${repoStatus.ahead}`;
-		}
-		if (repoStatus.hasUncommittedChanges) {
-			s += " •";
-		}
-		if (repoStatus.hasConflicts) {
-			s += " !";
-		}
-		s += "]";
-		return s;
-	} catch {
-		return "";
-	}
-}
-
-async function executeMenuChoice(
-	choice: string,
-	cmds: PiSyncCommands,
-	ctx: ExtensionCommandContext,
-): Promise<void> {
-	switch (choice) {
-		case "status":
-			await handleStatus(cmds, ctx);
-			return;
-		case "diff":
-			await handleDiff(cmds, ctx);
-			return;
-		case "pull":
-			await handlePull(cmds, ctx);
-			return;
-		case "push":
-			await handlePush(cmds, undefined, ctx);
-			return;
-		case "init":
-			await handleInit(cmds, undefined, ctx, false);
-			return;
-	}
-}
-
 // ========== 命令处理器 ==========
 
-async function handleInit(
+async function handlePiSync(
 	cmds: PiSyncCommands,
-	gitUrl: string | undefined,
 	ctx: ExtensionCommandContext,
-	force = false,
 ): Promise<void> {
-	let url = gitUrl;
+	let gitUrl: string | undefined;
+	let packageApproval: RunOptions["packageApproval"];
 
-	if (!url) {
+	const run = async (options: RunOptions = {}) => {
 		ctx.ui.setStatus(
 			"pi-sync",
-			ctx.ui.theme.fg("text", "Checking pi-sync status..."),
+			ctx.ui.theme.fg("text", "Checking sync state..."),
 		);
-		let result = await cmds.init(
-			undefined,
-			(msg) => {
-				ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", msg));
-			},
-			force,
-		);
-		ctx.ui.setStatus("pi-sync", undefined);
-
-		if (result.code === "approval_required") {
-			const approval = await requestPackageApproval(result, ctx);
-			if (!approval.approved) {
-				ctx.ui.notify("Package installation cancelled.", "warning");
-				return;
-			}
-			result = await cmds.init(undefined, undefined, force, approval);
+		try {
+			return await cmds.run({
+				...options,
+				onProgress: (_phase, message) => {
+					ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", message));
+				},
+			});
+		} finally {
+			ctx.ui.setStatus("pi-sync", undefined);
 		}
+	};
 
-		const details = result.details as { needsGitUrl?: boolean } | undefined;
-		if (!details?.needsGitUrl) {
-			notifyOperationResult(result, ctx);
-			if (result.reload) await ctx.reload();
-			return;
-		}
-
-		url = await ctx.ui.input(
+	let result = await run();
+	const details = result.details;
+	if (details?.needsGitUrl) {
+		gitUrl = await ctx.ui.input(
 			"Enter your config repo Git URL:",
 			"git@github.com:you/pi-config.git",
 		);
-
-		if (!url) {
-			ctx.ui.notify("Init cancelled.", "warning");
+		if (!gitUrl) {
+			ctx.ui.notify("Setup cancelled.", "warning");
 			return;
 		}
+		result = await run({ gitUrl });
 	}
 
-	ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Initializing..."));
-	let initResult = await cmds.init(
-		url,
-		(msg) => {
-			ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", msg));
-		},
-		force,
-	);
-	ctx.ui.setStatus("pi-sync", undefined);
-
-	if (initResult.code === "approval_required") {
-		const approval = await requestPackageApproval(initResult, ctx);
+	if (result.code === "approval_required") {
+		const approval = await requestPackageApproval(result, ctx);
 		if (!approval.approved) {
 			ctx.ui.notify("Package installation cancelled.", "warning");
 			return;
 		}
-		initResult = await cmds.init(url, undefined, force, approval);
+		packageApproval = {
+			approvedSources: approval.approvedSources,
+			remember: approval.remember,
+		};
+		result = await run({ gitUrl, packageApproval });
 	}
 
-	notifyOperationResult(initResult, ctx);
-
-	if (initResult.reload) {
-		await ctx.reload();
-	}
+	notifyOperationResult(result, ctx);
+	if (result.reload) await ctx.reload();
 }
 
 async function requestPackageApproval(
@@ -612,99 +379,4 @@ async function showOutput(
 			handleInput: () => done(),
 		};
 	});
-}
-
-// ========== push：准备、展示变更并立即执行 ==========
-
-async function handlePush(
-	cmds: PiSyncCommands,
-	subArgs: string | undefined,
-	ctx: ExtensionCommandContext,
-): Promise<void> {
-	// push --continue：直接继续冲突解决
-	if (subArgs === "--continue") {
-		ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Continuing push..."));
-		const result = await cmds.push(undefined, undefined, "--continue");
-		ctx.ui.setStatus("pi-sync", undefined);
-		notifyOperationResult(result, ctx);
-		if (result.reload) await ctx.reload();
-		return;
-	}
-
-	// 第一步：结构化准备，不依赖人类可读文案决定控制流
-	ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Checking changes..."));
-	const preparation = await cmds.preparePush();
-	ctx.ui.setStatus("pi-sync", undefined);
-
-	if (preparation.kind === "noop") {
-		notifyOperationResult(
-			{
-				message: preparation.message ?? "No changes to push.",
-				ok: true,
-				code: "noop",
-			},
-			ctx,
-		);
-		return;
-	}
-	if (preparation.kind === "blocked") {
-		notifyOperationResult(
-			{
-				message: preparation.message ?? "Push blocked.",
-				ok: false,
-				code: "blocked",
-			},
-			ctx,
-		);
-		return;
-	}
-
-	ctx.ui.notify(
-		ctx.ui.theme.fg(
-			"text",
-			`${preparation.message ?? "Push ready."}\n` +
-				`Captured: ${preparation.capture.captured.length}, deleted: ${preparation.capture.deleted.length}`,
-		),
-		"info",
-	);
-
-	ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Pushing..."));
-	const result = await cmds.executePush(preparation);
-	ctx.ui.setStatus("pi-sync", undefined);
-
-	notifyOperationResult(result, ctx);
-	if (result.reload) await ctx.reload();
-}
-
-// ========== capture ==========
-
-// ========== pull ==========
-
-async function handlePull(
-	cmds: PiSyncCommands,
-	ctx: ExtensionCommandContext,
-): Promise<void> {
-	ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Checking remote..."));
-	let result = await cmds.pull();
-	ctx.ui.setStatus("pi-sync", undefined);
-
-	if (result.code === "approval_required") {
-		const approval = await requestPackageApproval(result, ctx);
-		if (!approval.approved) {
-			ctx.ui.notify("Package installation cancelled.", "warning");
-			return;
-		}
-		ctx.ui.setStatus(
-			"pi-sync",
-			ctx.ui.theme.fg("text", "Applying approved packages..."),
-		);
-		result = await cmds.pull(undefined, approval);
-		ctx.ui.setStatus("pi-sync", undefined);
-	}
-
-	notifyOperationResult(result, ctx);
-
-	if (result.reload) {
-		await ctx.reload();
-	}
 }

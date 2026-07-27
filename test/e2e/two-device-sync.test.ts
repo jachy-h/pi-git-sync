@@ -89,9 +89,9 @@ describe.sequential("Two-device sync E2E", () => {
 			);
 
 			const aCmds = new PiSyncCommands(envA.agentDir);
-			const pushResult = await aCmds.push(fixture.deviceAPath);
+			const pushResult = await aCmds.run();
 			expect(pushResult.reload).toBe(true);
-			expect(pushResult.message).toContain("Pushed successfully");
+			expect(pushResult.message).toContain("Sync completed");
 
 			// === Step 3: Device B clones and applies ===
 			const { createTestEnvironment: createEnv } = await import(
@@ -121,23 +121,11 @@ describe.sequential("Two-device sync E2E", () => {
 
 				const bCmds = new PiSyncCommands(envB.agentDir);
 
-				// B pulls A's update
-				const pullResult = await bCmds.pull(envB.repoDir);
-				expect(pullResult.message).toBeDefined();
-				// Pull should succeed with reload=true; if not, check the message
-				if (!pullResult.reload) {
-					// May say "already up to date" if clone happened after push
-					// Verify B can at least get to a consistent state
-				}
-
-				// Force-fetch to ensure B's repo is up to date
-				await runGit(envB.repoDir, ["pull", "--ff-only", "origin", "main"]);
-
-				// Apply manually
-				const applyResult = await bCmds.apply(envB.repoDir);
-				expect(
-					applyResult.reload || applyResult.message.includes("up to date"),
-				).toBe(true);
+				// B uses the unified command: pull first, then push.
+				const pullResult = await bCmds.run();
+				expect(pullResult.ok).toBe(true);
+				expect(pullResult.reload).toBe(true);
+				expect(pullResult.message).toContain("Pull:");
 
 				// Verify B has the updated content
 				const bWelcome = await readFile(
@@ -152,12 +140,10 @@ describe.sequential("Two-device sync E2E", () => {
 				);
 				expect(JSON.parse(bTheme)).toEqual({ name: "custom" });
 
-				// No-op pull/push
-				const pullAgain = await bCmds.pull(envB.repoDir);
-				expect(pullAgain.message).toContain("Already up to date");
-
-				const pushAgain = await bCmds.push(envB.repoDir);
-				expect(pushAgain.message).toContain("No changes to push");
+				// A repeated unified run is idempotent.
+				const syncAgain = await bCmds.run();
+				expect(syncAgain.ok).toBe(true);
+				expect(syncAgain.code).toBe("noop");
 			} finally {
 				await envB.cleanup();
 			}
@@ -214,13 +200,14 @@ describe.sequential("Two-device sync E2E", () => {
 				// A changes and pushes first
 				await envA.writeAgentFile("prompts/welcome.md", "change from A\n");
 				const aCmds = new PiSyncCommands(envA.agentDir);
-				const pushA = await aCmds.push(fixture.deviceAPath);
+				const pushA = await aCmds.run();
 				expect(pushA.reload).toBe(true);
+				expect(pushA.ok).toBe(true);
 
-				// B also changes and tries to push → should detect conflict
+				// B also changes and tries to synchronize → should detect conflict
 				await envB.writeAgentFile("prompts/welcome.md", "change from B\n");
 				const bCmds = new PiSyncCommands(envB.agentDir);
-				const pushB = await bCmds.push(envB.repoDir);
+				const pushB = await bCmds.run();
 
 				// The device's changes are preserved on a branch for a manual Git merge.
 				expect(pushB.reload).toBe(false);

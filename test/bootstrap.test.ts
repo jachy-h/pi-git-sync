@@ -81,7 +81,7 @@ describe("bootstrap.sh", () => {
 		});
 	});
 
-	it("installs the extension and leaves repo initialization to /pisync init", async () => {
+	it("installs the extension and leaves repo initialization to /pisync", async () => {
 		await withTestEnvironment(async (environment) => {
 			await environment.writeExecutable(
 				"git",
@@ -125,7 +125,7 @@ describe("bootstrap.sh", () => {
 			expect(result.stdout).not.toMatch(/npm:@jachy\/pi-git-sync@\d/);
 			expect(result.stdout).toContain("Bootstrap complete");
 			expect(result.stdout).toContain(
-				"/pisync init git@github.com:test/pi-config.git",
+				"Run /pisync and enter the repository URL when prompted",
 			);
 			expect(result.stdout).not.toContain("Cloning config repository");
 		});
