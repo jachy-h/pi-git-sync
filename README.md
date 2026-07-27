@@ -18,7 +18,7 @@ Key features:
 - `settings.json` shared as a whole file — simple and predictable
 - Three-way diff with sync baseline — accurate detection of creates, deletes, and bilateral conflicts
 - Full push chain: `capture → commit → fetch → rebase → push → apply`
-- `push --continue` for resolving rebase conflicts mid-push
+- Conflict-safe device branches with explicit manual Git merges
 - Config repo is a standalone Git repo, not a Pi Package
 - All synced content lives under a single `sync/` directory
 
@@ -38,7 +38,7 @@ Create an empty private repo (any name you like). Do **NOT** check "Initialize w
 ### 2. Install pi-git-sync
 
 ```bash
-pi install npm:@jachy/pi-git-sync@<version>
+pi install npm:@jachy/pi-git-sync
 ```
 
 The config repository is user data, not a Pi package. Do not run `pi install` on the
@@ -54,7 +54,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/jachy-h/pi-git-sync/main/scr
   git@github.com:<your-username>/<your-repo>.git
 ```
 
-Set `PI_GIT_SYNC_VERSION` when a specific published version is required.
+The package source is intentionally unversioned. This lets Pi maintain one installation and prevents duplicate `/pisync` commands.
 
 ### 3. One-Click Init
 
@@ -191,8 +191,8 @@ Also: hidden files (except `.gitignore`) are excluded. Symlinks and symlink comp
 
 Every sync operation compares three states:
 
-```
-B = Baseline (last synced commit hash)  — stored in .pi-sync/state.json
+```text
+B = Baseline (last synced commit hash)  — stored in `<config-repo>/.pi-sync/state.json` (Git ignored)
 L = Local   (current agent files)
 R = Remote  (current repo sync/ files)
 ```
@@ -212,24 +212,34 @@ This gives accurate detection of:
 
 ### Push Flow
 
-```
+```text
 capture (agent → repo working tree)
   → commit
   → fetch origin
   → rebase onto origin/<configured branch>
-  → push
+  → push <configured branch>
+  → push current-device snapshot branch
   → apply (new HEAD → agent)
 ```
 
-If a rebase conflict occurs, the push pauses. Resolve conflicts with standard Git tools, then:
+Each device has one persistent, unique remote snapshot branch: `pisync-device/<hostname>-<UUID>`. A hostname is not unique; the UUID is stored only in `<config-repo>/.pi-sync/state.json`. That directory is Git-ignored and never synced. The tool therefore never scans remote branches and guesses a “unique device branch.”
+
+On conflict, pi-git-sync pushes current-device changes to that device branch and restores the configured branch to remote `main` (or `pi-sync.json.branch`). At that point `main` and the device branch are **intentionally different**. Merge the current device branch into the shared branch:
 
 ```bash
-/pisync push --continue
+cd <sync-repository>
+git fetch origin
+git switch main
+git merge origin/pisync-device/<hostname>-<UUID>
+# resolve conflicts, then
+git add <files>
+git commit
+git push origin main
 ```
 
 ### Pull Flow
 
-```
+```text
 fetch origin
   → check for local un-captured changes (block if any)
   → fast-forward only (block if diverged)

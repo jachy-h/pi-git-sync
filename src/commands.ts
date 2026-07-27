@@ -10,19 +10,23 @@
  * - capture → commit → fetch → rebase → push → apply 完整 push 链
  * - 冲突处理与 push --continue
  */
-import { join } from "node:path";
 import { existsSync } from "node:fs";
+import { hostname } from "node:os";
+import { join } from "node:path";
 import { readFile, mkdir } from "node:fs/promises";
 import {
 	gitStatus,
 	gitFetch,
 	gitPull,
 	gitPush,
+	gitPushHeadToBranch,
+	gitPushDeviceBranch,
 	gitRenameBranch,
 	gitDiff,
 	gitDiffRange,
 	gitDiffStaged,
 	gitRebase,
+	gitRebaseAbort,
 	gitCommit,
 	getHeadCommit,
 	isDiverged,
@@ -39,7 +43,7 @@ import { planMaterialize, executeMaterialize } from "./materialize.ts";
 import { createBackup, listBackups, restoreBackup } from "./backup.ts";
 import { SyncLock } from "./lock.ts";
 import { scanSecrets } from "./security.ts";
-import { loadState, saveState, updateState } from "./state.ts";
+import { ensureDeviceId, loadState, saveState, updateState } from "./state.ts";
 import type { SyncState } from "./state.ts";
 import type { CommandResult, ResultCode } from "./operation-result.ts";
 import { captureChanges } from "./capture.ts";
@@ -222,6 +226,117 @@ export class PiSyncCommands {
 		this.lock = new SyncLock(join(this.agentDir, ".pi-sync"));
 	}
 
+	// ========== 冲突分支 ==========
+
+	/**
+	 * Each agent owns one stable remote snapshot branch. A hostname is readable
+	 * but not unique, so it is paired with a UUID persisted only in local state.
+	 * We never scan remote branches and guess: the current device branch is known
+	 * deterministically, while other devices may legitimately have many branches.
+	 */
+	private async getDeviceBranchName(): Promise<string> {
+		const host =
+			hostname()
+				.toLowerCase()
+				.replace(/[^a-z0-9_-]+/g, "-")
+				.replace(/^-+|-+$/g, "")
+				.slice(0, 40) || "device";
+		const deviceId = await ensureDeviceId(this.agentDir);
+		return `pisync-device/${host}-${deviceId}`;
+	}
+
+	/** Push the shared branch and a snapshot of the current device at the same HEAD. */
+	private async pushMainAndDeviceBranches(
+		repoPath: string,
+		branch: string,
+	): Promise<string> {
+		await gitPush(repoPath, branch);
+		const deviceBranch = await this.getDeviceBranchName();
+		await gitPushHeadToBranch(repoPath, deviceBranch);
+		return deviceBranch;
+	}
+
+	private formatManualMergeMessage(
+		repoPath: string,
+		config: PiSyncConfig,
+		branch: string,
+	): string {
+		return [
+			"Sync conflict detected. The shared branch was left unchanged.",
+			`Current-device changes were saved to origin/${branch}.`,
+			"",
+			"Merge the current-device branch into the shared branch:",
+			`  cd ${repoPath}`,
+			"  git fetch origin",
+			`  git switch ${config.branch}`,
+			`  git merge origin/${branch}`,
+			"",
+			`Resolve any conflicts, then run git add, git commit, and git push origin ${config.branch}.`,
+		].join("\n");
+	}
+
+	/** Save and publish current-device changes, leaving the configured branch untouched. */
+	private async preserveConflictOnDeviceBranch(
+		repoPath: string,
+		config: PiSyncConfig,
+		state: SyncState,
+	): Promise<string> {
+		const branch = await this.getDeviceBranchName();
+		await gitExec(repoPath, ["switch", "-C", branch]);
+		try {
+			const capture = await captureChanges(
+				this.agentDir,
+				repoPath,
+				config,
+				state,
+				{ preferLocalOnConflicts: true },
+			);
+			if (capture.errors.length > 0 || capture.denied.length > 0) {
+				throw new Error(
+					`Could not preserve current-device changes on ${branch}: ${[
+						...capture.errors.map((error) => `${error.file}: ${error.message}`),
+						...capture.denied.map((file) => `${file}: denied by sync policy`),
+					].join("; ")}`,
+				);
+			}
+			await gitCommit(
+				repoPath,
+				"pi-sync: preserve current-device conflict changes",
+			);
+			await gitPushDeviceBranch(repoPath, branch);
+			return branch;
+		} finally {
+			await gitExec(repoPath, ["switch", config.branch]);
+		}
+	}
+
+	/**
+	 * A rebase has already committed current-device changes on the configured
+	 * branch. Publish that commit on the device branch, then restore the shared
+	 * branch to origin so the user can merge the remote device branch explicitly.
+	 */
+	private async preserveRebaseConflictOnDeviceBranch(
+		repoPath: string,
+		config: PiSyncConfig,
+	): Promise<string> {
+		const branch = await this.getDeviceBranchName();
+		await gitRebaseAbort(repoPath);
+		await gitExec(repoPath, ["branch", "-f", branch]);
+		await gitExec(repoPath, ["switch", branch]);
+		try {
+			await gitExec(repoPath, [
+				"branch",
+				"-f",
+				config.branch,
+				`origin/${config.branch}`,
+			]);
+			await gitPushDeviceBranch(repoPath, branch);
+		} finally {
+			await gitExec(repoPath, ["switch", config.branch]);
+		}
+		return branch;
+	}
+
 	// ========== status ==========
 
 	async status(repoPath?: string): Promise<string> {
@@ -246,6 +361,7 @@ export class PiSyncCommands {
 
 		return formatSyncStatusV2({
 			repoPath: rp,
+			agentDir: this.agentDir,
 			gitStatus: status,
 			config,
 			inventory,
@@ -335,10 +451,16 @@ export class PiSyncCommands {
 			);
 
 			if (result.hasConflicts) {
-				const conflictList = result.conflicts
-					.map((c) => `  ${c.relativePath}`)
-					.join("\n");
-				return `Capture blocked: bilateral modifications detected.\nResolve conflicts manually or run /pisync status for details.\n\nConflicts:\n${conflictList}`;
+				try {
+					const branch = await this.preserveConflictOnDeviceBranch(
+						rp,
+						config,
+						state,
+					);
+					return this.formatManualMergeMessage(rp, config, branch);
+				} catch (error) {
+					return `Could not create a current-device conflict branch: ${error instanceof Error ? error.message : "Unknown error"}`;
+				}
 			}
 
 			return formatCaptureResult(result);
@@ -654,20 +776,36 @@ export class PiSyncCommands {
 				state,
 			);
 			if (capture.hasConflicts) {
-				const conflicts = capture.conflicts
-					.map((c) => `  ${c.relativePath}`)
-					.join("\n");
-				return {
-					kind: "blocked",
-					capture,
-					changedFiles: [],
-					diff: "",
-					repoHead: statusBefore.commit,
-					worktreeFingerprint: "",
-					repoPath: rp,
-					branch: config.branch,
-					message: `Push blocked: bilateral modifications detected.\n\nConflicts:\n${conflicts}`,
-				};
+				try {
+					const branch = await this.preserveConflictOnDeviceBranch(
+						rp,
+						config,
+						state,
+					);
+					return {
+						kind: "blocked",
+						capture,
+						changedFiles: [],
+						diff: "",
+						repoHead: statusBefore.commit,
+						worktreeFingerprint: "",
+						repoPath: rp,
+						branch: config.branch,
+						message: this.formatManualMergeMessage(rp, config, branch),
+					};
+				} catch (error) {
+					return {
+						kind: "blocked",
+						capture,
+						changedFiles: [],
+						diff: "",
+						repoHead: statusBefore.commit,
+						worktreeFingerprint: "",
+						repoPath: rp,
+						branch: config.branch,
+						message: `Could not create a current-device conflict branch: ${error instanceof Error ? error.message : "Unknown error"}`,
+					};
+				}
 			}
 			if (capture.errors.length > 0) {
 				return {
@@ -877,19 +1015,25 @@ export class PiSyncCommands {
 				try {
 					const rebaseResult = await gitRebase(rp, preparation.branch);
 					if (rebaseResult.conflict) {
-						await updateState(this.agentDir, {
-							pendingOperation: {
-								type: "push-rebase-conflict",
-								startedAt: new Date().toISOString(),
-							},
-						});
-						return {
-							ok: false,
-							code: "blocked_conflict",
-							message:
-								"Rebase conflict detected. Resolve conflicts, run git add and git rebase --continue, then /pisync push --continue.",
-							reload: false,
-						};
+						try {
+							const branch = await this.preserveRebaseConflictOnDeviceBranch(
+								rp,
+								config,
+							);
+							return {
+								ok: false,
+								code: "blocked_conflict",
+								message: this.formatManualMergeMessage(rp, config, branch),
+								reload: false,
+							};
+						} catch (error) {
+							return {
+								ok: false,
+								code: "git_failed",
+								message: `Could not create a current-device conflict branch: ${error instanceof Error ? error.message : "Unknown error"}`,
+								reload: false,
+							};
+						}
 					}
 				} catch (err) {
 					return {
@@ -902,7 +1046,7 @@ export class PiSyncCommands {
 			}
 
 			try {
-				await gitPush(rp, preparation.branch);
+				await this.pushMainAndDeviceBranches(rp, preparation.branch);
 			} catch (err) {
 				return {
 					ok: false,
@@ -935,6 +1079,24 @@ export class PiSyncCommands {
 	): Promise<{ message: string; reload: boolean }> {
 		if (subCommand === "--continue") return this.pushContinue(repoPath);
 		const preparation = await this.preparePush(repoPath);
+		if (preparation.kind === "noop") {
+			try {
+				await this.pushMainAndDeviceBranches(
+					preparation.repoPath,
+					preparation.branch,
+				);
+				return {
+					message:
+						"No changes to push. Main and device branches are synchronized.",
+					reload: false,
+				};
+			} catch (error) {
+				return {
+					message: `Could not synchronize main and device branches: ${error instanceof Error ? error.message : "Unknown error"}`,
+					reload: false,
+				};
+			}
+		}
 		if (preparation.kind !== "ready") {
 			return { message: preparation.message ?? "Push blocked.", reload: false };
 		}
@@ -1020,9 +1182,9 @@ export class PiSyncCommands {
 				}
 			}
 
-			// 5. Push
+			// 5. Push the shared branch and the current-device snapshot.
 			try {
-				await gitPush(rp, config.branch);
+				await this.pushMainAndDeviceBranches(rp, config.branch);
 			} catch (err) {
 				return {
 					message: `Push failed: ${err instanceof Error ? err.message : "Unknown"}`,
@@ -1224,7 +1386,7 @@ export class PiSyncCommands {
 								`A config repo already exists at ${defaultPath}\n` +
 								`Existing remote: ${existingUrl}\nProvided URL:   ${gitUrl}\n` +
 								"To switch, remove the existing repo first: rm -rf ~/.pi/config-repo\n" +
-								"Or use: /pisync init --force <git-url>",
+								`Or use: /pisync init --force ${gitUrl}`,
 							needsReload: false,
 							ok: false,
 							level: "error",
@@ -1366,11 +1528,18 @@ export class PiSyncCommands {
 						: ["push", "origin", scaffoldConfig.branch];
 					if (force) {
 						await gitExec(defaultPath, pushArgs);
+						await gitPushHeadToBranch(
+							defaultPath,
+							await this.getDeviceBranchName(),
+						);
 					} else {
-						await gitPush(defaultPath, scaffoldConfig.branch);
+						await this.pushMainAndDeviceBranches(
+							defaultPath,
+							scaffoldConfig.branch,
+						);
 					}
 					lines.push(
-						`Scaffold committed and pushed to origin/${scaffoldConfig.branch}.`,
+						`Scaffold committed and pushed to origin/${scaffoldConfig.branch} and the current-device branch.`,
 					);
 				} catch (err) {
 					await updateState(this.agentDir, { repoPath: defaultPath });
@@ -1393,7 +1562,7 @@ export class PiSyncCommands {
 						`The repository at ${gitUrl} has commits but is not a valid pi-sync config repo.\n` +
 						"A pi-sync config repo must have a pi-sync.json at its root.\n" +
 						"Either use an empty repository for auto-scaffolding, or ensure the repo contains a valid pi-sync.json file.\n\n" +
-						"To force rebuild this repository, use: /pisync init --force <git-url>",
+						`To force rebuild this repository, use: /pisync init --force ${gitUrl}`,
 					needsReload: false,
 					ok: false,
 					level: "error",
@@ -1562,6 +1731,7 @@ export class PiSyncCommands {
 				files: {},
 				pendingOperation: null,
 				lastBackup: null,
+				deviceId: null,
 			});
 
 			lines.push("Repo cleared successfully (local + remote).");
@@ -1600,6 +1770,7 @@ export class PiSyncCommands {
 			files: {},
 			pendingOperation: null,
 			lastBackup: null,
+			deviceId: null,
 		};
 		const scaffoldState = await this.createRepositoryBaseline(
 			repoPath,
@@ -1703,9 +1874,17 @@ export class PiSyncCommands {
 		if (plan.blocked) {
 			const errorLines: string[] = [];
 			if (plan.conflicts.length > 0) {
-				errorLines.push("Bilateral conflicts detected:");
-				for (const c of plan.conflicts) {
-					errorLines.push(`  ${c.relativePath}`);
+				try {
+					const branch = await this.preserveConflictOnDeviceBranch(
+						rp,
+						config,
+						state,
+					);
+					errorLines.push(this.formatManualMergeMessage(rp, config, branch));
+				} catch (error) {
+					errorLines.push(
+						`Could not create a current-device conflict branch: ${error instanceof Error ? error.message : "Unknown error"}`,
+					);
 				}
 			}
 			if (plan.validationErrors.length > 0) {

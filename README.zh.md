@@ -18,7 +18,7 @@ pi-git-sync 将你的 Pi 配置保存在一个**私有 Git 仓库**中，并在�
 - `settings.json` 作为完整文件共享 — 简单且可预期
 - 基于同步基线的三方 diff — 精准检测创建、删除和双边冲突
 - 完整 push 链：`capture → commit → fetch → rebase → push → apply`
-- `push --continue` 用于推送过程中解决 rebase 冲突
+- 冲突时创建当前设备分支，并通过标准 Git merge 手动解决
 - 配置仓库是独立的 Git 仓库，不是 Pi Package
 - 所有同步内容统一存放在 `sync/` 目录下
 
@@ -38,7 +38,7 @@ pi-git-sync 将你的 Pi 配置保存在一个**私有 Git 仓库**中，并在�
 ### 2. 安装 pi-git-sync
 
 ```bash
-pi install npm:@jachy/pi-git-sync@<version>
+pi install npm:@jachy/pi-git-sync
 ```
 
 配置仓库是用户数据，不是 Pi Package。不要对配置仓库本身执行 `pi install`。
@@ -52,7 +52,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/jachy-h/pi-git-sync/main/scr
   git@github.com:<your-username>/<your-repo>.git
 ```
 
-需要固定发布版本时，可设置 `PI_GIT_SYNC_VERSION`。
+package source 故意不带版本号，以便 Pi 只维护一份安装，避免出现重复的 `/pisync` 命令。
 
 ### 3. 一键初始化
 
@@ -185,8 +185,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/jachy-h/pi-git-sync/main/scr
 
 每次同步操作比较三个状态：
 
-```
-B = 基线（上次同步的 commit 哈希）— 存储在 .pi-sync/state.json
+```text
+B = 基线（上次同步的 commit 哈希）— 存储在 `<config-repo>/.pi-sync/state.json`（Git ignored）
 L = 本地（当前 agent 文件）
 R = 远端（当前仓库 sync/ 文件）
 ```
@@ -206,24 +206,34 @@ R = 远端（当前仓库 sync/ 文件）
 
 ### Push 流程
 
-```
+```text
 capture（agent → 仓库工作树）
   → commit
   → fetch origin
   → rebase 到 origin/<配置分支>
-  → push
+  → push <配置分支>
+  → push 当前设备快照分支
   → apply（新 HEAD → agent）
 ```
 
-如果 rebase 发生冲突，push 会暂停。使用标准 Git 工具解决冲突后：
+每台设备都有一个持久、唯一的远端快照分支：`pisync-device/<主机名>-<UUID>`。主机名不是唯一标识，UUID 仅保存在本机 `<config-repo>/.pi-sync/state.json`；该目录被 Git 忽略，不会参与同步。因此工具不会扫描远端分支后猜测“唯一设备分支”。
+
+发生冲突时，pi-git-sync 会把当前设备的改动推送到该设备分支，并将配置分支恢复到远端 `main`（或 `pi-sync.json.branch`）。此时 `main` 与设备分支**故意不一致**；应从共享分支合并当前设备分支：
 
 ```bash
-/pisync push --continue
+cd <同步仓库目录>
+git fetch origin
+git switch main
+git merge origin/pisync-device/<主机名>-<UUID>
+# 解决冲突后
+git add <文件>
+git commit
+git push origin main
 ```
 
 ### Pull 流程
 
-```
+```text
 fetch origin
   → 检查是否有未捕获的本地变更（如有则阻止）
   → 仅 fast-forward（分叉时阻止）

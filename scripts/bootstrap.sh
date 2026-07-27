@@ -68,9 +68,22 @@ fi
 #
 # 配置仓库是用户数据，不是 Pi package。把配置仓库安装成 package 会导致
 # 仓库里的扩展被重复加载，也会让 bootstrap 在本地路径和分支上产生隐式假设。
-# 发布新版本时同步更新默认版本；PI_GIT_SYNC_VERSION 允许镜像或测试环境显式固定版本。
-PI_GIT_SYNC_VERSION="${PI_GIT_SYNC_VERSION:-0.1.16}"
-PI_GIT_SYNC_PACKAGE="npm:@jachy/pi-git-sync@${PI_GIT_SYNC_VERSION}"
+# 始终安装未固定版本的唯一 package source。旧脚本安装固定版本，Pi 会将其
+# 视为另一个 source，从而同时加载两个扩展并把重复的 /pisync 命名为
+# /pisync1、/pisync2。先只移除带版本号的旧 source，再安装当前 source。
+PI_GIT_SYNC_PACKAGE="npm:@jachy/pi-git-sync"
+LEGACY_PACKAGES="$(pi list 2>/dev/null | awk '/^[[:space:]]+npm:@jachy\/pi-git-sync@[^[:space:]]+$/ { print $1 }')"
+
+if [[ -n "${LEGACY_PACKAGES}" ]]; then
+	while IFS= read -r legacy_package; do
+		[[ -z "${legacy_package}" ]] && continue
+		info "Removing legacy ${legacy_package}..."
+		if ! pi remove "${legacy_package}"; then
+			error "Failed to remove legacy package ${legacy_package}."
+			exit 1
+		fi
+	done <<<"${LEGACY_PACKAGES}"
+fi
 
 info "Config repository: ${REPO_URL}"
 info "Installing ${PI_GIT_SYNC_PACKAGE}..."
@@ -90,6 +103,6 @@ info ""
 info "Next steps:"
 info "  1. Start pi"
 info "  2. Run /pisync init ${REPO_URL}"
-info "  3. Run /pisync apply to apply config"
+info "  3. Run /pisync pull to apply config"
 info "  4. Run /pisync doctor to verify setup"
 info ""

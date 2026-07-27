@@ -88,6 +88,24 @@ describe.sequential("PiSyncCommands.push", () => {
 				await runGit(fixture.deviceBPath, ["rev-parse", "HEAD"])
 			).stdout;
 			expect(localHead).toBe(remoteHead);
+
+			// Every successful push publishes an immutable-name snapshot for this
+			// agent as well as the shared main branch.
+			const deviceRefs = (
+				await runGit(fixture.deviceBPath, [
+					"for-each-ref",
+					"--format=%(refname)",
+					"refs/remotes/origin/pisync-device",
+				])
+			).stdout
+				.trim()
+				.split("\n")
+				.filter(Boolean);
+			expect(deviceRefs).toHaveLength(1);
+			expect(
+				(await runGit(fixture.deviceBPath, ["rev-parse", deviceRefs[0]!]))
+					.stdout,
+			).toBe(remoteHead);
 		});
 	});
 
@@ -193,29 +211,95 @@ describe.sequential("PiSyncCommands.push", () => {
 			// Local: modify same file differently
 			await environment.writeAgentFile("prompts/welcome.md", "local change\n");
 
-			// Push detects the conflict as a rebase conflict (local change captured to repo,
-			// committed, then rebase onto origin/main creates a conflict)
+			// Preserve the current-device commit on a new branch instead of leaving
+			// the repository in a rebase or asking the user to compare two files.
 			const result = await new PiSyncCommands(environment.agentDir).push(
 				fixture.deviceBPath,
 			);
+			const conflictBranch = result.message.match(/git merge ([^\s]+)/)?.[1];
 
 			expect(result).toMatchObject({
 				reload: false,
-				message: expect.stringContaining("Rebase conflict"),
+				message: expect.stringContaining("Sync conflict detected"),
 			});
+			expect(result.message).toContain("git merge origin/pisync-device/");
+			expect(result.message).not.toContain("Agent (local)");
+			expect(conflictBranch).toBeDefined();
 
-			// Verify pending operation is set
 			const state = await loadState(environment.agentDir);
-			expect(state.pendingOperation?.type).toBe("push-rebase-conflict");
+			expect(state.pendingOperation).toBeNull();
+			expect(
+				await runGit(fixture.deviceBPath, [
+					"show",
+					`${conflictBranch!}:sync/prompts/welcome.md`,
+				]),
+			).toMatchObject({ stdout: "local change" });
 
-			// Remote commit should be unchanged
+			// The configured branch is restored to the remote version, ready for
+			// `git merge <current-device-branch>`.
 			const remoteHeadAfter = (
 				await runGit(fixture.deviceAPath, ["rev-parse", "origin/main"])
 			).stdout;
 			const localHeadAfter = (
-				await runGit(fixture.deviceAPath, ["rev-parse", "HEAD"])
+				await runGit(fixture.deviceBPath, ["rev-parse", "HEAD"])
 			).stdout;
-			expect(remoteHeadAfter).toBe(localHeadAfter);
+			expect(localHeadAfter).toBe(remoteHeadAfter);
+			expect(
+				await runGit(fixture.deviceBPath, ["branch", "--show-current"]),
+			).toMatchObject({ stdout: "main" });
+		});
+	});
+
+	it("preserves an already-detected bilateral conflict on a current-device branch", async () => {
+		await withTestEnvironment(async (environment) => {
+			const fixture = await createGitFixture(environment.rootDir);
+			await seedConfigRepo(fixture.deviceAPath);
+			await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
+			await runGit(fixture.deviceBPath, ["pull", "--ff-only"]);
+			await environment.writeAgentFile("prompts/welcome.md", "base\n");
+			await saveState(
+				environment.agentDir,
+				createSyncState({
+					repoPath: fixture.deviceBPath,
+					files: {
+						"prompts/welcome.md": { sha256: sha256("base\n"), mode: 0o644 },
+					},
+				}),
+			);
+
+			await writeFile(
+				join(fixture.deviceAPath, "sync/prompts/welcome.md"),
+				"remote change\n",
+				"utf-8",
+			);
+			await runGit(fixture.deviceAPath, ["add", "--all"]);
+			await runGit(fixture.deviceAPath, ["commit", "-m", "Remote change"]);
+			await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
+			await runGit(fixture.deviceBPath, ["pull", "--ff-only"]);
+			await environment.writeAgentFile("prompts/welcome.md", "local change\n");
+
+			const preparation = await new PiSyncCommands(
+				environment.agentDir,
+			).preparePush(fixture.deviceBPath);
+			const conflictBranch =
+				preparation.message?.match(/git merge ([^\s]+)/)?.[1];
+
+			expect(preparation.kind).toBe("blocked");
+			expect(preparation.message).toContain("Sync conflict detected");
+			expect(preparation.message).toContain("git merge origin/pisync-device/");
+			expect(conflictBranch).toBeDefined();
+			expect(
+				await runGit(fixture.deviceBPath, [
+					"show",
+					`${conflictBranch!}:sync/prompts/welcome.md`,
+				]),
+			).toMatchObject({ stdout: "local change" });
+			expect(
+				await readFile(
+					join(fixture.deviceBPath, "sync/prompts/welcome.md"),
+					"utf-8",
+				),
+			).toBe("remote change\n");
 		});
 	});
 
@@ -351,7 +435,7 @@ describe.sequential("PiSyncCommands.push", () => {
 });
 
 describe.sequential("PiSyncCommands.push (rebase conflict and --continue)", () => {
-	it("detects rebase conflict and sets pending operation state", async () => {
+	it("preserves a rebase conflict on a current-device branch", async () => {
 		await withTestEnvironment(async (environment) => {
 			const fixture = await createGitFixture(environment.rootDir);
 
@@ -393,20 +477,28 @@ describe.sequential("PiSyncCommands.push (rebase conflict and --continue)", () =
 				"local conflicting change\n",
 			);
 
-			// Push – rebase should conflict because we capture local change to repo,
-			// commit it locally, then rebase onto origin/main which has a conflicting change
+			// Push captures the local change, but preserves it on a separate branch
+			// rather than leaving the repository in a rebase state.
 			const result = await new PiSyncCommands(environment.agentDir).push(
 				fixture.deviceBPath,
 			);
+			const conflictBranch = result.message.match(/git merge ([^\s]+)/)?.[1];
 
 			expect(result).toMatchObject({
 				reload: false,
-				message: expect.stringContaining("Rebase conflict"),
+				message: expect.stringContaining("Sync conflict detected"),
 			});
-
-			// State should have pending operation
-			const state = await loadState(environment.agentDir);
-			expect(state.pendingOperation?.type).toBe("push-rebase-conflict");
+			expect(result.message).toContain("git merge origin/pisync-device/");
+			expect(conflictBranch).toBeDefined();
+			expect(
+				await runGit(fixture.deviceBPath, [
+					"show",
+					`${conflictBranch!}:sync/prompts/welcome.md`,
+				]),
+			).toMatchObject({ stdout: "local conflicting change" });
+			expect(
+				(await loadState(environment.agentDir)).pendingOperation,
+			).toBeNull();
 		});
 	});
 

@@ -68,7 +68,7 @@ pi-git-sync/
 │   ├── lock.ts               # 并发锁（pid 级，含 staleness 检测）
 │   ├── security.ts           # hard deny 列表 + secret scanning
 │   ├── glob.ts               # minimatch glob + 路径规范化 + 安全检查
-│   ├── state.ts              # 同步基线持久化（~/.pi/.pi-sync/state.json）
+│   ├── state.ts              # 同步基线持久化（<config-repo>/.pi-sync/state.json，Git ignored）
 │   ├── packages.ts           # settings.json packages[] 解析、审批、执行与回滚
 │   ├── path-safety.ts        # repo/agent root 与 symlink 边界
 │   ├── operation-result.ts   # 结构化命令结果
@@ -637,7 +637,7 @@ graph LR
 ┌──────────────────────────────────────────┐
 │  apply 前: createBackup()                │
 │                                          │
-│  备份目录: .pi-sync/backups/<timestamp>/ │
+│  备份目录: <config-repo>/.pi-sync/backups/<timestamp>/ │
 │  ├── backup.json  (清单)                 │
 │  └── data/                               │
 │      ├── prompts/welcome.md              │
@@ -669,7 +669,7 @@ graph LR
 <user>-pi-config/                  # GitHub Private Repo
 ├── .gitignore
 ├── pi-sync.json                  # 同步配置 (config schema v2)
-└── .pi-sync/                     # agent 本地 state schema v3、备份与锁
+├── .pi-sync/                     # 本机 state、备份与锁（Git ignored）
 └── sync/                         # 所有同步内容
     ├── settings.json              # 共享 settings (整文件)
     ├── AGENTS.md                  # (可选)
@@ -710,12 +710,11 @@ graph LR
         CR["~/.pi/config-repo/<br/>pi-sync.json<br/>sync/<br/>  ├── settings.json<br/>  ├── extensions/<br/>  ├── skills/<br/>  ├── prompts/<br/>  └── themes/"]
     end
     
-    subgraph "State"
+    subgraph "Config Repo 本机状态（Git ignored）"
         ST[".pi-sync/<br/>  ├── state.json<br/>  ├── sync.lock<br/>  └── backups/"]
     end
     
     AD <-.->|"capture / materialize"| CR
-    AD --- ST
     CR --- ST
     CR <-.->|"git push / pull"| GitHub
 ```

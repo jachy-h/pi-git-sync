@@ -16,7 +16,7 @@ compatible, but the local sync state changes from schema v2 to schema v3.
 
 On the first command that loads state, pi-git-sync:
 
-1. Backs up `.pi-sync/state.json` as a versioned `state.v2.backup-*.json` file.
+1. Backs up `<config-repo>/.pi-sync/state.json` as a versioned `state.v2.backup-*.json` file.
 2. Converts string `pendingOperation` values to structured v3 objects.
 3. Reconciles a v2 baseline only when the local and repository hashes match.
 4. Removes baseline entries when both sides are absent.
@@ -41,7 +41,7 @@ New or changed sources in `sync/settings.json` require explicit approval before 
 `pi install`. Approved sources may be remembered in the local, non-synced trust store:
 
 ```text
-~/.pi/agent/.pi-sync/package-trust.json
+<config-repo>/.pi-sync/package-trust.json
 ```
 
 Package sources are still passed to Pi as argv values, never through a shell. If an install
@@ -61,7 +61,7 @@ behavior of silently skipping symlinks.
 Bootstrap now installs the published extension package:
 
 ```bash
-pi install npm:@jachy/pi-git-sync@<version>
+pi install npm:@jachy/pi-git-sync
 ```
 
 It does not install the config repository as a Pi package and does not clone the repository
@@ -71,7 +71,7 @@ itself. After installation, run:
 /pisync init <repo-url>
 ```
 
-Use `PI_GIT_SYNC_VERSION` to pin a bootstrap installation to a specific published version.
+Bootstrap removes any versioned legacy source before installing this unversioned source, preventing duplicate `/pisync` commands.
 
 ## Rollback and downgrade
 

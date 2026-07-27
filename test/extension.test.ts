@@ -77,6 +77,12 @@ function showOutputOf(ctx: FakeCommandContext): string {
 	return (ctx.ui as RpcFakeUi).showOutputText;
 }
 
+function notificationTextOf(ctx: FakeCommandContext): string {
+	return ctx.ui.notifications
+		.map((notification) => notification.message)
+		.join("\n");
+}
+
 const config = {
 	schemaVersion: 2,
 	branch: "main",
@@ -169,9 +175,9 @@ describe("pisync command routing", () => {
 		const cmd = api.commands.get("pisync")!;
 		await cmd.handler("unknown", ctx);
 
-		// The menu selects "status" and routes to handleStatus → showOutput
-		expect(showOutputOf(ctx).length).toBeGreaterThan(0);
-		expect(showOutputOf(ctx)).toContain("No config repo");
+		// The menu selects "status" and appends the result without opening a modal.
+		expect(notificationTextOf(ctx)).toContain("No config repo");
+		expect(showOutputOf(ctx)).toBe("");
 	});
 
 	it("routes to status subcommand", async () => {
@@ -182,11 +188,9 @@ describe("pisync command routing", () => {
 		const cmd = api.commands.get("pisync")!;
 		await cmd.handler("status", ctx);
 
-		// showOutput renders via custom() which we intercept in RpcFakeUi
-
-		expect(showOutputOf(ctx).length).toBeGreaterThan(0);
-		// Should contain status info
-		expect(showOutputOf(ctx)).toContain("No config repo");
+		// Status is a non-blocking notification, not a focused custom component.
+		expect(notificationTextOf(ctx)).toContain("No config repo");
+		expect(showOutputOf(ctx)).toBe("");
 	});
 
 	it("routes to diff subcommand", async () => {
@@ -294,7 +298,8 @@ describe("pisync command routing", () => {
 		const cmd = api.commands.get("pisync")!;
 		await cmd.handler("  status  ", ctx);
 
-		expect(showOutputOf(ctx)).toContain("No config repo");
+		expect(notificationTextOf(ctx)).toContain("No config repo");
+		expect(showOutputOf(ctx)).toBe("");
 	});
 });
 
@@ -583,6 +588,7 @@ describe("status updates are cleared on completion", () => {
 		const cmd = api.commands.get("pisync")!;
 		await cmd.handler("status", ctx);
 
-		expect(showOutputOf(ctx).length).toBeGreaterThan(0);
+		expect(notificationTextOf(ctx)).toContain("No config repo");
+		expect(showOutputOf(ctx)).toBe("");
 	});
 });
