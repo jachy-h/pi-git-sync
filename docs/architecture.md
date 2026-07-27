@@ -43,7 +43,7 @@ pi-git-sync 是一个 Pi 扩展，通过 **Git 私有仓库** 在多台机器之
 | `settings.json` 整文件共享 | 不做 key-level merge，所有设备用同一份 |
 | 仓库不作为 Pi Package 安装 | 避免 Extension/Skill 重复加载 |
 | 单向 mirror（`sync/` ↔ agent dir） | 相同相对路径，Git diff 直观 |
-| 三方比较（Baseline / Local / Remote） | 精确识别创建、删除、双边冲突 |
+| 三方比较（Baseline / Local / Remote） | 识别创建、删除、双边冲突；可快进设备分支自动合入 |
 | 仅 fast-forward pull | 有分叉就停止，不自动合并 |
 | push 链: capture → commit → rebase → push → apply | 确保 rebase 后 agent 与 repo 一致 |
 

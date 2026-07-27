@@ -371,7 +371,7 @@ describe.sequential("PiSyncCommands.push", () => {
 		});
 	});
 
-	it("preserves an already-detected bilateral conflict on a current-device branch", async () => {
+	it("fast-forwards an already-detected bilateral conflict into the shared branch", async () => {
 		await withTestEnvironment(async (environment) => {
 			const fixture = await createGitFixture(environment.rootDir);
 			await seedConfigRepo(fixture.deviceAPath);
@@ -399,28 +399,29 @@ describe.sequential("PiSyncCommands.push", () => {
 			await runGit(fixture.deviceBPath, ["pull", "--ff-only"]);
 			await environment.writeAgentFile("prompts/welcome.md", "local change\n");
 
-			const preparation = await new PiSyncCommands(
-				environment.agentDir,
-			).preparePush(fixture.deviceBPath);
-			const conflictBranch =
-				preparation.message?.match(/git merge ([^\s]+)/)?.[1];
+			const result = await new PiSyncCommands(environment.agentDir).push(
+				fixture.deviceBPath,
+			);
 
-			expect(preparation.kind).toBe("blocked");
-			expect(preparation.message).toContain("Sync conflict detected");
-			expect(preparation.message).toContain("git merge origin/pisync-device/");
-			expect(conflictBranch).toBeDefined();
-			expect(
-				await runGit(fixture.deviceBPath, [
-					"show",
-					`${conflictBranch!}:sync/prompts/welcome.md`,
-				]),
-			).toMatchObject({ stdout: "local change" });
+			expect(result).toMatchObject({
+				reload: false,
+				message: expect.stringContaining(
+					"Sync conflict resolved by fast-forwarding",
+				),
+			});
+			expect(result.message).not.toContain("git merge origin/pisync-device/");
 			expect(
 				await readFile(
 					join(fixture.deviceBPath, "sync/prompts/welcome.md"),
 					"utf-8",
 				),
-			).toBe("remote change\n");
+			).toBe("local change\n");
+			expect(
+				await runGit(fixture.deviceBPath, [
+					"show",
+					"origin/main:sync/prompts/welcome.md",
+				]),
+			).toMatchObject({ stdout: "local change" });
 		});
 	});
 

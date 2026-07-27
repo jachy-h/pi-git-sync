@@ -251,7 +251,8 @@ fetch origin
 ## Safety
 
 - Pull uses **fast-forward only**; stops on divergence
-- **Bilateral conflict detection** — never silently overwrites both sides
+- **Bilateral conflict detection** — automatically fast-forwards a current-device
+  branch when possible; only non-fast-forward merges require manual resolution
 - Automatic **secret scanning** before push (API keys, tokens, private keys)
 - **Atomic config writes** (temp file → rename)
 - Automatic **backup** before every apply, with **fail-closed rollback** support

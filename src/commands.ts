@@ -34,6 +34,7 @@ import {
 	gitExec,
 	gitProbe,
 	gitRemoteRefExists,
+	canFastForward,
 	GitCommandError,
 } from "./git.ts";
 import { loadPiSyncConfig } from "./config.ts";
@@ -274,12 +275,19 @@ export class PiSyncCommands {
 		].join("\n");
 	}
 
-	/** Save and publish current-device changes, leaving the configured branch untouched. */
+	private formatFastForwardedConflictMessage(config: PiSyncConfig): string {
+		return [
+			"Sync conflict resolved by fast-forwarding current-device changes.",
+			`The current-device version was published to ${config.branch}.`,
+		].join("\n");
+	}
+
+	/** Save and publish current-device changes, fast-forwarding the shared branch when safe. */
 	private async preserveConflictOnDeviceBranch(
 		repoPath: string,
 		config: PiSyncConfig,
 		state: SyncState,
-	): Promise<string> {
+	): Promise<{ branch: string; fastForwarded: boolean }> {
 		const branch = await this.getDeviceBranchName();
 		await gitExec(repoPath, ["switch", "-C", branch]);
 		try {
@@ -303,7 +311,39 @@ export class PiSyncCommands {
 				"pi-sync: preserve current-device conflict changes",
 			);
 			await gitPushDeviceBranch(repoPath, branch);
-			return branch;
+			await gitFetch(repoPath);
+
+			if (
+				!(await canFastForward(repoPath, `origin/${config.branch}`, branch))
+			) {
+				return { branch, fastForwarded: false };
+			}
+
+			await gitExec(repoPath, ["switch", config.branch]);
+			await gitExec(repoPath, ["merge", "--ff-only", branch]);
+			try {
+				await gitPush(repoPath, config.branch);
+				return { branch, fastForwarded: true };
+			} catch (error) {
+				const output =
+					error instanceof GitCommandError
+						? `${error.stdout}\n${error.stderr}`
+						: "";
+				if (!/rejected|fetch first|non-fast-forward/i.test(output)) {
+					throw error;
+				}
+				// A concurrent remote update invalidated the preflight. The device
+				// branch is already published, so restore the shared branch and let
+				// the normal manual-resolution path handle the new topology.
+				await gitFetch(repoPath);
+				await gitExec(repoPath, [
+					"branch",
+					"-f",
+					config.branch,
+					`origin/${config.branch}`,
+				]);
+				return { branch, fastForwarded: false };
+			}
 		} finally {
 			await gitExec(repoPath, ["switch", config.branch]);
 		}
@@ -453,12 +493,21 @@ export class PiSyncCommands {
 
 			if (result.hasConflicts) {
 				try {
-					const branch = await this.preserveConflictOnDeviceBranch(
+					const preservation = await this.preserveConflictOnDeviceBranch(
 						rp,
 						config,
 						state,
 					);
-					return this.formatManualMergeMessage(rp, config, branch);
+					if (preservation.fastForwarded) {
+						const applyResult = await this.applyCurrent(
+							rp,
+							config,
+							state,
+							"capture",
+						);
+						return `${this.formatFastForwardedConflictMessage(config)}\n${applyResult.message}`;
+					}
+					return this.formatManualMergeMessage(rp, config, preservation.branch);
 				} catch (error) {
 					return `Could not create a current-device conflict branch: ${error instanceof Error ? error.message : "Unknown error"}`;
 				}
@@ -604,15 +653,32 @@ export class PiSyncCommands {
 				);
 				if (capture.hasConflicts) {
 					try {
-						const branch = await this.preserveConflictOnDeviceBranch(
+						const preservation = await this.preserveConflictOnDeviceBranch(
 							rp,
 							config,
 							state,
 						);
+						if (preservation.fastForwarded) {
+							const applyResult = await this.applyCurrent(
+								rp,
+								config,
+								state,
+								"pull",
+								packageApproval,
+							);
+							return {
+								...applyResult,
+								message: `${this.formatFastForwardedConflictMessage(config)}\n${applyResult.message}`,
+							};
+						}
 						return {
 							ok: false,
 							code: "blocked_conflict",
-							message: this.formatManualMergeMessage(rp, config, branch),
+							message: this.formatManualMergeMessage(
+								rp,
+								config,
+								preservation.branch,
+							),
 							reload: false,
 						};
 					} catch (error) {
@@ -826,11 +892,30 @@ export class PiSyncCommands {
 			);
 			if (capture.hasConflicts) {
 				try {
-					const branch = await this.preserveConflictOnDeviceBranch(
+					const preservation = await this.preserveConflictOnDeviceBranch(
 						rp,
 						config,
 						state,
 					);
+					if (preservation.fastForwarded) {
+						const applyResult = await this.applyCurrent(
+							rp,
+							config,
+							state,
+							"push",
+						);
+						return {
+							kind: applyResult.ok ? "noop" : "blocked",
+							capture,
+							changedFiles: [],
+							diff: "",
+							repoHead: await getHeadCommit(rp),
+							worktreeFingerprint: "",
+							repoPath: rp,
+							branch: config.branch,
+							message: `${this.formatFastForwardedConflictMessage(config)}\n${applyResult.message}`,
+						};
+					}
 					return {
 						kind: "blocked",
 						capture,
@@ -840,7 +925,11 @@ export class PiSyncCommands {
 						worktreeFingerprint: "",
 						repoPath: rp,
 						branch: config.branch,
-						message: this.formatManualMergeMessage(rp, config, branch),
+						message: this.formatManualMergeMessage(
+							rp,
+							config,
+							preservation.branch,
+						),
 					};
 				} catch (error) {
 					return {
@@ -1144,6 +1233,7 @@ export class PiSyncCommands {
 				);
 				return {
 					message:
+						preparation.message ??
 						"No changes to push. Main and device branches are synchronized.",
 					reload: false,
 				};
@@ -1974,12 +2064,27 @@ export class PiSyncCommands {
 			const errorLines: string[] = [];
 			if (plan.conflicts.length > 0) {
 				try {
-					const branch = await this.preserveConflictOnDeviceBranch(
+					const preservation = await this.preserveConflictOnDeviceBranch(
 						rp,
 						config,
 						state,
 					);
-					errorLines.push(this.formatManualMergeMessage(rp, config, branch));
+					if (preservation.fastForwarded) {
+						const resolved = await this.applyCurrent(
+							rp,
+							config,
+							state,
+							reason,
+							packageApproval,
+						);
+						return {
+							...resolved,
+							message: `${this.formatFastForwardedConflictMessage(config)}\n${resolved.message}`,
+						};
+					}
+					errorLines.push(
+						this.formatManualMergeMessage(rp, config, preservation.branch),
+					);
 				} catch (error) {
 					errorLines.push(
 						`Could not create a current-device conflict branch: ${error instanceof Error ? error.message : "Unknown error"}`,
