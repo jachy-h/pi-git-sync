@@ -72,7 +72,6 @@ pi-git-sync/
 │   ├── packages.ts           # settings.json packages[] 解析、审批、执行与回滚
 │   ├── path-safety.ts        # repo/agent root 与 symlink 边界
 │   ├── operation-result.ts   # 结构化命令结果
-│   ├── doctor.ts             # 环境诊断（git/ssh/portability）
 │   ├── validate.ts           # JSON / conflict marker / settings 可移植性校验
 │   ├── settings.ts           # v1 遗留（deepMerge/deepEqual）
 │   ├── ui.ts                 # 格式化输出（status/diff/backup/capture）
@@ -157,7 +156,7 @@ graph TD
 
 v2 → v3 迁移会先备份旧 state。只有 local/repo hash 相同的路径会自动写入新 baseline；
 两边都不存在的路径会移除。差异、不可用路径和 symlink 会保留旧 baseline，并写入
-`migrationReport.conflicts`，等待 doctor/status 引导人工处理。
+`migrationReport.conflicts`，等待 status 引导人工处理。
 
 ### 3.4 配置清单 (pi-sync.json)
 
@@ -184,7 +183,7 @@ graph TB
     end
 
     subgraph "命令编排层"
-        commands["commands.ts<br/>push/pull/init/status/diff/<br/>capture/rollback/doctor"]
+        commands["commands.ts<br/>push/pull/init/status/diff/<br/>capture"]
     end
 
     subgraph "核心引擎层"
@@ -212,7 +211,6 @@ graph TB
 
     subgraph "辅助层"
         packages["packages.ts<br/>package reconcile"]
-        doctor["doctor.ts<br/>环境诊断"]
         ui["ui.ts<br/>格式化输出"]
     end
 
@@ -228,7 +226,6 @@ graph TB
     commands --> state
     commands --> config
     commands --> packages
-    commands --> doctor
 
     inventory --> glob
     inventory --> state
@@ -294,7 +291,7 @@ graph TB
 
 `path-safety.ts` 会检查 repo root、sync root、agent 路径以及每一级已存在组件。
 root、目录、文件或 dangling symlink 都会阻断操作；不会跟随 symlink，也不会再静默
-跳过危险路径。backup、restore、capture、materialize、inventory 和 doctor 共用这一策略。
+跳过危险路径。backup、restore、capture、materialize 和 inventory 共用这一策略。
 
 ### 5.4 Hard Deny 列表（不可覆盖）
 
@@ -342,7 +339,7 @@ stateDiagram-v2
     Pushed --> Idle: apply + updateState
     Pushed --> ConflictState: rebase 冲突
     ConflictState --> Pushed: git rebase --continue<br/>+ /pisync push --continue
-    ConflictState --> Idle: git rebase --abort<br/>+ /pisync doctor
+    ConflictState --> Idle: git rebase --abort<br/>+ /pisync status
 ```
 
 ---
@@ -650,14 +647,13 @@ graph LR
 └──────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────┐
-│  rollback: restoreBackup()               │
+│  apply 失败: restoreBackup()             │
 │                                          │
-│  1. 先备份当前状态 (pre-rollback)         │
-│  2. 恢复 backed_up 文件 → 原子写入        │
-│  3. 恢复 will_delete 文件 → 原子写入      │
-│  4. 删除 will_create 文件 → unlink       │
-│  5. hash 校验失败 → 拒绝恢复              │
-│  6. 数据文件缺失 → 拒绝恢复               │
+│  1. 恢复 backed_up 文件 → 原子写入        │
+│  2. 恢复 will_delete 文件 → 原子写入      │
+│  3. 删除 will_create 文件 → unlink       │
+│  4. hash 校验失败 → 拒绝恢复              │
+│  5. 数据文件缺失 → 拒绝恢复               │
 └──────────────────────────────────────────┘
 ```
 
@@ -693,9 +689,6 @@ graph LR
 | `/pisync pull` | ✅ | ✅ | fetch/ff/apply/reload | 拉取远端变更 |
 | `/pisync push` | ✅ | ✅ | capture/commit/rebase/push/apply/reload | 推送本地变更 |
 | `/pisync push --continue` | ✅ | ✅ | validate/scan/push/apply/reload | 继续冲突解决后的推送 |
-| `/pisync capture` | ✅ | - | agent → repo 文件复制 | 仅捕获，不 commit/push |
-| `/pisync doctor` | - | - | - | 环境诊断 |
-| `/pisync rollback` | ✅ | - | 备份恢复/reload | 回滚到上一个备份 |
 | `debug:clear-repo` | ✅ | ✅ | 清空本地+远端/reload | 🔴 仅调试用 |
 
 ## 附录 C: 数据流总览

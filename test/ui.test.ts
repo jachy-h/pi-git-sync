@@ -4,7 +4,6 @@ import {
 	formatSyncStatusV2,
 	formatComparisonDiff,
 	formatSecretsFindings,
-	formatBackupList,
 	formatValidationErrors,
 	formatCaptureResult,
 } from "../src/ui.ts";
@@ -416,38 +415,6 @@ describe("formatValidationErrors", () => {
 
 	it("returns 'No validation errors' for empty list", () => {
 		expect(formatValidationErrors([])).toBe("No validation errors.");
-	});
-});
-
-describe("formatBackupList", () => {
-	it("formats a list of backups", () => {
-		const backups = [
-			{
-				timestamp: "2026-01-02T00-00-00-000Z",
-				commit: "abc1234567890",
-				reason: "apply",
-				operation: "apply",
-				path: "/backups/1",
-				files: {},
-			},
-			{
-				timestamp: "2026-01-01T00-00-00-000Z",
-				commit: "def4567890123",
-				reason: "pre-rollback",
-				operation: "push",
-				path: "/backups/2",
-				files: {},
-			},
-		];
-		const result = formatBackupList(backups);
-		expect(result).toContain("Available backups:");
-		expect(result).toContain("2026");
-		expect(result).toContain("apply");
-		expect(result).toContain("pre-rollback");
-	});
-
-	it("returns 'No backups available' for empty list", () => {
-		expect(formatBackupList([])).toBe("No backups available.");
 	});
 });
 

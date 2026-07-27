@@ -112,9 +112,6 @@ step, with a confirmation prompt after showing you the diff.
 | `/pisync pull` | Pull remote changes and apply to agent |
 | `/pisync push` | Capture, commit, and push local changes |
 | `/pisync push --continue` | Continue push after resolving rebase conflicts |
-| `/pisync capture` | Import local config changes into repo (no commit/push) |
-| `/pisync doctor` | Run diagnostic checks |
-| `/pisync rollback` | Rollback to last backup |
 
 ---
 
@@ -176,7 +173,7 @@ Also: hidden files (except `.gitignore`) are excluded. Symlinks and symlink comp
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `schemaVersion` | `2` | — | Config schema version (currently `2`) |
-| `branch` | `string` | `"main"` | The single Git branch used by init, status, pull, push, rebase, and doctor |
+| `branch` | `string` | `"main"` | The single Git branch used by init, status, pull, push, and rebase |
 | `root` | `string` | `"sync"` | Root directory inside the repo for synced content |
 | `include` | `string[]` | — | Glob whitelist (relative to `root`). Supports `*`, `**`, `?` |
 | `exclude` | `string[]` | `[]` | Glob patterns to exclude (lower priority than built-in hard deny) |
@@ -224,7 +221,11 @@ capture (agent → repo working tree)
 
 Each device has one persistent, unique remote snapshot branch: `pisync-device/<hostname>-<UUID>`. A hostname is not unique; the UUID is stored only in `<config-repo>/.pi-sync/state.json`. That directory is Git-ignored and never synced. The tool therefore never scans remote branches and guesses a “unique device branch.”
 
-On conflict, pi-git-sync pushes current-device changes to that device branch and restores the configured branch to remote `main` (or `pi-sync.json.branch`). At that point `main` and the device branch are **intentionally different**. Merge the current device branch into the shared branch:
+On conflict, pi-git-sync pushes current-device changes to that device branch and
+restores the configured branch to remote `main` (or `pi-sync.json.branch`). It
+then automatically merges the device branch and pushes the result whenever Git
+can merge it cleanly. Only a real content conflict or a concurrent remote update
+requires manual resolution:
 
 ```bash
 cd <sync-repository>
@@ -251,8 +252,9 @@ fetch origin
 ## Safety
 
 - Pull uses **fast-forward only**; stops on divergence
-- **Bilateral conflict detection** — automatically fast-forwards a current-device
-  branch when possible; only non-fast-forward merges require manual resolution
+- **Bilateral conflict detection** — automatically fast-forwards or cleanly merges
+  a current-device branch; only content conflicts or concurrent remote updates
+  require manual resolution
 - Automatic **secret scanning** before push (API keys, tokens, private keys)
 - **Atomic config writes** (temp file → rename)
 - Automatic **backup** before every apply, with **fail-closed rollback** support
@@ -322,7 +324,6 @@ pi-git-sync/
 │   ├── backup.ts          # Backup & rollback
 │   ├── lock.ts            # Concurrency lock (pid-based with staleness detection)
 │   ├── security.ts        # Built-in hard deny list & secret scanning
-│   ├── doctor.ts          # Environment diagnostics (git, ssh, portability)
 │   ├── validate.ts        # File content validation (JSON, conflict markers, portability)
 │   ├── state.ts           # Sync state persistence (baseline)
 │   ├── packages.ts        # Package reconciliation (settings.json packages[])

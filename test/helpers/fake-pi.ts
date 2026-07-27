@@ -1,97 +1,115 @@
 export type NotificationLevel = "info" | "warning" | "error";
 
 export interface Notification {
-  message: string;
-  level: NotificationLevel;
+	message: string;
+	level: NotificationLevel;
 }
 
 export interface StatusUpdate {
-  key: string;
-  value: unknown;
+	key: string;
+	value: unknown;
 }
 
 export interface RegisteredCommand {
-  description?: string;
-  handler: (args: string | undefined, context: FakeCommandContext) => Promise<void> | void;
+	description?: string;
+	getArgumentCompletions?: (prefix: string) => Array<{
+		value: string;
+		label: string;
+		description?: string;
+	}> | null;
+	handler: (
+		args: string | undefined,
+		context: FakeCommandContext,
+	) => Promise<void> | void;
 }
 
 export class FakeUi {
-  readonly notifications: Notification[] = [];
-  readonly statusUpdates: StatusUpdate[] = [];
-  readonly confirmCalls: Array<{ title: string; message: string }> = [];
-  readonly inputCalls: Array<{ title: string; placeholder?: string }> = [];
-  readonly selectCalls: Array<{ title: string; options: unknown[] }> = [];
-  readonly theme = {
-    fg: (_role: string, text: string) => text,
-  };
-  confirmResponses: boolean[] = [];
-  inputResponses: Array<string | undefined> = [];
-  selectResponses: Array<string | undefined> = [];
+	readonly notifications: Notification[] = [];
+	readonly statusUpdates: StatusUpdate[] = [];
+	readonly confirmCalls: Array<{ title: string; message: string }> = [];
+	readonly inputCalls: Array<{ title: string; placeholder?: string }> = [];
+	readonly selectCalls: Array<{ title: string; options: unknown[] }> = [];
+	readonly theme = {
+		fg: (_role: string, text: string) => text,
+	};
+	confirmResponses: boolean[] = [];
+	inputResponses: Array<string | undefined> = [];
+	selectResponses: Array<string | undefined> = [];
 
-  setStatus(key: string, value: unknown): void {
-    this.statusUpdates.push({ key, value });
-  }
+	setStatus(key: string, value: unknown): void {
+		this.statusUpdates.push({ key, value });
+	}
 
-  notify(message: string, level: NotificationLevel): void {
-    this.notifications.push({ message, level });
-  }
+	notify(message: string, level: NotificationLevel): void {
+		this.notifications.push({ message, level });
+	}
 
-  async confirm(title: string, message: string): Promise<boolean> {
-    this.confirmCalls.push({ title, message });
-    return this.confirmResponses.shift() ?? false;
-  }
+	async confirm(title: string, message: string): Promise<boolean> {
+		this.confirmCalls.push({ title, message });
+		return this.confirmResponses.shift() ?? false;
+	}
 
-  async input(title: string, placeholder?: string): Promise<string | undefined> {
-    this.inputCalls.push({ title, placeholder });
-    return this.inputResponses.shift();
-  }
+	async input(
+		title: string,
+		placeholder?: string,
+	): Promise<string | undefined> {
+		this.inputCalls.push({ title, placeholder });
+		return this.inputResponses.shift();
+	}
 
-  async select(title: string, options: unknown[]): Promise<string | undefined> {
-    this.selectCalls.push({ title, options });
-    return this.selectResponses.shift();
-  }
+	async select(title: string, options: unknown[]): Promise<string | undefined> {
+		this.selectCalls.push({ title, options });
+		return this.selectResponses.shift();
+	}
 
-  async custom<T>(_renderer: unknown): Promise<T | undefined> {
-    return undefined;
-  }
+	async custom<T>(_renderer: unknown): Promise<T | undefined> {
+		return undefined;
+	}
 }
 
 export class FakeCommandContext {
-  ui: FakeUi;
-  readonly mode: "interactive" | "rpc";
-  reloadCalls = 0;
-  reloadError: Error | undefined;
+	ui: FakeUi;
+	readonly mode: "interactive" | "rpc";
+	reloadCalls = 0;
+	reloadError: Error | undefined;
 
-  constructor(mode: "interactive" | "rpc" = "interactive") {
-    this.ui = new FakeUi();
-    this.mode = mode;
-  }
+	constructor(mode: "interactive" | "rpc" = "interactive") {
+		this.ui = new FakeUi();
+		this.mode = mode;
+	}
 
-  async reload(): Promise<void> {
-    this.reloadCalls += 1;
-    if (this.reloadError) throw this.reloadError;
-  }
+	async reload(): Promise<void> {
+		this.reloadCalls += 1;
+		if (this.reloadError) throw this.reloadError;
+	}
 }
 
-export type EventHandler = (event: unknown, context: FakeCommandContext) => unknown;
+export type EventHandler = (
+	event: unknown,
+	context: FakeCommandContext,
+) => unknown;
 
 export class FakeExtensionApi {
-  readonly commands = new Map<string, RegisteredCommand>();
-  readonly eventHandlers = new Map<string, EventHandler[]>();
+	readonly commands = new Map<string, RegisteredCommand>();
+	readonly eventHandlers = new Map<string, EventHandler[]>();
 
-  registerCommand(name: string, command: RegisteredCommand): void {
-    this.commands.set(name, command);
-  }
+	registerCommand(name: string, command: RegisteredCommand): void {
+		this.commands.set(name, command);
+	}
 
-  on(event: string, handler: EventHandler): void {
-    const handlers = this.eventHandlers.get(event) ?? [];
-    handlers.push(handler);
-    this.eventHandlers.set(event, handlers);
-  }
+	on(event: string, handler: EventHandler): void {
+		const handlers = this.eventHandlers.get(event) ?? [];
+		handlers.push(handler);
+		this.eventHandlers.set(event, handlers);
+	}
 
-  async emit(event: string, payload: unknown, context: FakeCommandContext): Promise<void> {
-    for (const handler of this.eventHandlers.get(event) ?? []) {
-      await handler(payload, context);
-    }
-  }
+	async emit(
+		event: string,
+		payload: unknown,
+		context: FakeCommandContext,
+	): Promise<void> {
+		for (const handler of this.eventHandlers.get(event) ?? []) {
+			await handler(payload, context);
+		}
+	}
 }

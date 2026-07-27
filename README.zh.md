@@ -106,9 +106,6 @@ package source 故意不带版本号，以便 Pi 只维护一份安装，避免�
 | `/pisync pull` | 拉取远端变更并应用到 agent |
 | `/pisync push` | 捕获、提交并推送本地变更 |
 | `/pisync push --continue` | 解决 rebase 冲突后继续推送 |
-| `/pisync capture` | 将本地配置变更导入仓库（不提交也不推送） |
-| `/pisync doctor` | 运行诊断检查 |
-| `/pisync rollback` | 回滚到上一个备份 |
 
 ---
 
@@ -170,7 +167,7 @@ package source 故意不带版本号，以便 Pi 只维护一份安装，避免�
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `schemaVersion` | `2` | — | 配置 schema 版本（当前为 `2`） |
-| `branch` | `string` | `"main"` | init、status、pull、push、rebase、doctor 统一使用的唯一 Git 分支 |
+| `branch` | `string` | `"main"` | init、status、pull、push、rebase 统一使用的唯一 Git 分支 |
 | `root` | `string` | `"sync"` | 仓库中同步内容的根目录 |
 | `include` | `string[]` | — | Glob 白名单（相对于 `root`）。支持 `*`、`**`、`?` |
 | `exclude` | `string[]` | `[]` | Glob 排除列表（优先级低于内置 hard deny） |
@@ -218,7 +215,10 @@ capture（agent → 仓库工作树）
 
 每台设备都有一个持久、唯一的远端快照分支：`pisync-device/<主机名>-<UUID>`。主机名不是唯一标识，UUID 仅保存在本机 `<config-repo>/.pi-sync/state.json`；该目录被 Git 忽略，不会参与同步。因此工具不会扫描远端分支后猜测“唯一设备分支”。
 
-发生冲突时，pi-git-sync 会把当前设备的改动推送到该设备分支，并将配置分支恢复到远端 `main`（或 `pi-sync.json.branch`）。此时 `main` 与设备分支**故意不一致**；应从共享分支合并当前设备分支：
+发生冲突时，pi-git-sync 会把当前设备的改动推送到该设备分支，并将配置分支
+恢复到远端 `main`（或 `pi-sync.json.branch`）。只要 Git 能无冲突合并，工具会
+自动合并该设备分支并推送结果；仅真正的内容冲突或共享分支被并发更新时才需要
+手动处理：
 
 ```bash
 cd <同步仓库目录>
@@ -245,7 +245,8 @@ fetch origin
 ## 安全措施
 
 - Pull 默认**仅 fast-forward**，分叉时停止
-- **双边冲突检测** — 可快进时自动合入当前设备分支；仅非快进合并需要手动解决
+- **双边冲突检测** — 可快进或无冲突合并时自动合入当前设备分支；仅内容冲突
+  或共享分支并发更新需要手动解决
 - Push 前自动**扫描敏感信息**（API Key、Token、私钥等）
 - **原子配置写入**（临时文件 → rename）
 - 每次 apply 前自动**备份**，失败时 fail-closed 并支持**回滚**
@@ -314,7 +315,6 @@ pi-git-sync/
 │   ├── backup.ts          # 备份与回滚
 │   ├── lock.ts            # 并发锁（基于 pid，可检测过期）
 │   ├── security.ts        # 内置 hard deny 列表与敏感信息扫描
-│   ├── doctor.ts          # 环境诊断（git、ssh、可移植性）
 │   ├── validate.ts        # 文件内容校验（JSON、冲突标记、可移植性）
 │   ├── state.ts           # 同步状态持久化（基线）
 │   ├── packages.ts        # Package reconciliation（settings.json packages[]）

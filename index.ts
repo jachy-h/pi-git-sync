@@ -18,9 +18,6 @@
  *   /pisync diff         - 显示差异
  *   /pisync pull         - 从远端拉取并应用
  *   /pisync push         - 捕获、提交并推送
- *   /pisync capture      - 导入本地配置到仓库
- *   /pisync doctor       - 诊断检查
- *   /pisync rollback     - 回滚到上一个备份
  */
 import type {
 	ExtensionAPI,
@@ -40,6 +37,44 @@ import {
 } from "./src/commands.ts";
 import { gitStatus } from "./src/git.ts";
 import { loadPiSyncConfig } from "./src/config.ts";
+
+const pisyncSubcommands: SelectItem[] = [
+	{
+		value: "init",
+		label: "init",
+		description: "Initialize or clone a config repo",
+	},
+	{
+		value: "status",
+		label: "status",
+		description: "Show detailed sync status",
+	},
+	{
+		value: "diff",
+		label: "diff",
+		description: "Show pending changes before sync",
+	},
+	{
+		value: "pull",
+		label: "pull",
+		description: "Pull and apply remote changes",
+	},
+	{
+		value: "push",
+		label: "push",
+		description: "Commit and push local changes",
+	},
+];
+
+function getPiSyncArgumentCompletions(prefix: string): SelectItem[] | null {
+	if (/\s/.test(prefix)) return null;
+
+	const query = prefix.toLowerCase();
+	const matches = pisyncSubcommands.filter((command) =>
+		command.value.toLowerCase().includes(query),
+	);
+	return matches.length > 0 ? matches : null;
+}
 
 export default function (pi: ExtensionAPI) {
 	const cmds = new PiSyncCommands();
@@ -80,7 +115,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("pisync", {
 		description:
-			"Sync Pi configuration via Git repository (init|status|diff|pull|push|capture|doctor|rollback)",
+			"Sync Pi configuration via Git repository (init|status|diff|pull|push)",
+		getArgumentCompletions: getPiSyncArgumentCompletions,
 		async handler(args, ctx) {
 			const parts = args?.trim().split(/\s+/) ?? [];
 			const subCommand = parts[0];
@@ -108,15 +144,6 @@ export default function (pi: ExtensionAPI) {
 					break;
 				case "push":
 					await handlePush(cmds, subArgs || undefined, ctx);
-					break;
-				case "capture":
-					await handleCapture(cmds, ctx);
-					break;
-				case "doctor":
-					await handleDoctor(cmds, ctx);
-					break;
-				case "rollback":
-					await handleRollback(cmds, ctx);
 					break;
 				default:
 					await showMenu(cmds, ctx);
@@ -246,26 +273,6 @@ function classifyResult(output: string, operation: string): ClassifiedResult {
 	return { kind: "detail", summary: "", detail: output };
 }
 
-function notifyResult(
-	result: ClassifiedResult,
-	ctx: ExtensionCommandContext,
-): void {
-	if (isManualMergeMessage(result.detail)) {
-		notifyManualMergeMessage(result.detail, ctx);
-		return;
-	}
-
-	if (result.kind === "detail") {
-		ctx.ui.notify(result.detail, "info");
-	} else if (result.kind === "success") {
-		ctx.ui.notify(result.summary, "info");
-	} else if (result.kind === "warning") {
-		ctx.ui.notify(result.summary, "warning");
-	} else {
-		ctx.ui.notify(result.summary, "error");
-	}
-}
-
 // ========== TUI 菜单 ==========
 
 async function showMenu(
@@ -281,16 +288,10 @@ async function showMenu(
 async function getMenuChoice(
 	ctx: ExtensionCommandContext,
 ): Promise<string | null> {
-	const menuOptions = [
-		{ value: "init", label: "Init" },
-		{ value: "status", label: "Status" },
-		{ value: "diff", label: "Diff" },
-		{ value: "pull", label: "Pull" },
-		{ value: "push", label: "Push" },
-		{ value: "capture", label: "Capture" },
-		{ value: "doctor", label: "Doctor" },
-		{ value: "rollback", label: "Rollback" },
-	];
+	const menuOptions = pisyncSubcommands.map((command) => ({
+		...command,
+		label: command.label.charAt(0).toUpperCase() + command.label.slice(1),
+	}));
 
 	const summary = await getRepoSummary();
 
@@ -304,7 +305,7 @@ async function getMenuChoice(
 
 	const lines = [
 		`pi-git-sync${summary}`,
-		"Available commands: /pisync init|status|diff|pull|push|capture|doctor|rollback",
+		"Available commands: /pisync init|status|diff|pull|push",
 	];
 	ctx.ui.notify(lines.join("\n"), "info");
 	return null;
@@ -315,23 +316,12 @@ async function showTuiMenu(
 	summary: string,
 	ctx: ExtensionCommandContext,
 ): Promise<string | null> {
-	const items: SelectItem[] = options.map((opt) => {
-		const descriptions: Record<string, string> = {
-			init: "Initialize or clone a config repo",
-			status: "Show detailed sync status",
-			diff: "Show pending changes before sync",
-			pull: "Pull and apply remote changes",
-			push: "Commit and push local changes",
-			capture: "Import local config into repo",
-			doctor: "Run diagnostic checks",
-			rollback: "Restore previous backup",
-		};
-		return {
-			value: opt.value,
-			label: opt.label,
-			description: descriptions[opt.value],
-		};
-	});
+	const items: SelectItem[] = options.map((opt) => ({
+		...opt,
+		description: pisyncSubcommands.find(
+			(command) => command.value === opt.value,
+		)?.description,
+	}));
 
 	return ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
 		const container = new Container();
@@ -438,15 +428,6 @@ async function executeMenuChoice(
 			return;
 		case "init":
 			await handleInit(cmds, undefined, ctx, false);
-			return;
-		case "capture":
-			await handleCapture(cmds, ctx);
-			return;
-		case "doctor":
-			await handleDoctor(cmds, ctx);
-			return;
-		case "rollback":
-			await handleRollback(cmds, ctx);
 			return;
 	}
 }
@@ -607,14 +588,6 @@ async function handleDiff(
 	await showOutput(ctx, output);
 }
 
-async function handleDoctor(
-	cmds: PiSyncCommands,
-	ctx: ExtensionCommandContext,
-): Promise<void> {
-	const output = await cmds.doctor();
-	await showOutput(ctx, output);
-}
-
 // ========== 通用纯文本输出（text 颜色） ==========
 
 async function showOutput(
@@ -695,18 +668,6 @@ async function handlePush(
 
 // ========== capture ==========
 
-async function handleCapture(
-	cmds: PiSyncCommands,
-	ctx: ExtensionCommandContext,
-): Promise<void> {
-	ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Capturing..."));
-	const output = await cmds.capture();
-	ctx.ui.setStatus("pi-sync", undefined);
-
-	const result = classifyResult(output, "Capture");
-	notifyResult(result, ctx);
-}
-
 // ========== pull ==========
 
 async function handlePull(
@@ -736,36 +697,4 @@ async function handlePull(
 	if (result.reload) {
 		await ctx.reload();
 	}
-}
-
-// ========== rollback ==========
-
-async function handleRollback(
-	cmds: PiSyncCommands,
-	ctx: ExtensionCommandContext,
-): Promise<void> {
-	const output = await cmds.rollback();
-
-	if (output.includes("No backups")) {
-		ctx.ui.notify("No backups available.", "warning");
-		return;
-	}
-
-	// 展示备份信息
-	ctx.ui.notify(output, "info");
-
-	const confirmed = await ctx.ui.confirm(
-		"pi-sync: Confirm rollback",
-		"Rollback to the previous backup? Current state will be backed up first.",
-	);
-
-	if (!confirmed) {
-		ctx.ui.notify("Rollback cancelled.", "warning");
-		return;
-	}
-
-	// rollback 已经在 cmds.rollback() 中完成
-	const result = classifyResult(output, "Rollback");
-	notifyResult(result, ctx);
-	await ctx.reload();
 }

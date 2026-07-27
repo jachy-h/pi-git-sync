@@ -371,6 +371,80 @@ describe.sequential("PiSyncCommands.push", () => {
 		});
 	});
 
+	it("automatically merges a device branch when rebase conflicts but merge is clean", async () => {
+		await withTestEnvironment(async (environment) => {
+			const fixture = await createGitFixture(environment.rootDir);
+			await seedConfigRepo(fixture.deviceAPath);
+			await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
+			await runGit(fixture.deviceBPath, ["pull", "--ff-only"]);
+			await environment.writeAgentFile("prompts/welcome.md", "base\n");
+			await saveState(
+				environment.agentDir,
+				createSyncState({
+					repoPath: fixture.deviceBPath,
+					files: {
+						"prompts/welcome.md": { sha256: sha256("base\n"), mode: 0o644 },
+					},
+				}),
+			);
+
+			// Replaying the first local commit conflicts with the remote change, but
+			// the second commit reverts it. The final device snapshot can merge cleanly.
+			await writeFile(
+				join(fixture.deviceBPath, "sync/prompts/welcome.md"),
+				"local intermediate\n",
+				"utf-8",
+			);
+			await runGit(fixture.deviceBPath, ["add", "--all"]);
+			await runGit(fixture.deviceBPath, ["commit", "-m", "Local interim edit"]);
+			await writeFile(
+				join(fixture.deviceBPath, "sync/prompts/welcome.md"),
+				"base\n",
+				"utf-8",
+			);
+			await runGit(fixture.deviceBPath, ["add", "--all"]);
+			await runGit(fixture.deviceBPath, [
+				"commit",
+				"-m",
+				"Revert local interim edit",
+			]);
+
+			await writeFile(
+				join(fixture.deviceAPath, "sync/prompts/welcome.md"),
+				"remote change\n",
+				"utf-8",
+			);
+			await runGit(fixture.deviceAPath, ["add", "--all"]);
+			await runGit(fixture.deviceAPath, ["commit", "-m", "Remote edit"]);
+			await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
+			await environment.writeAgentFile("prompts/extra.md", "local extra\n");
+
+			const result = await new PiSyncCommands(environment.agentDir).push(
+				fixture.deviceBPath,
+			);
+
+			expect(result).toMatchObject({
+				reload: true,
+				message: expect.stringContaining(
+					"Sync conflict resolved by automatically merging",
+				),
+			});
+			expect(result.message).not.toContain("git merge origin/pisync-device/");
+			expect(
+				await runGit(fixture.deviceBPath, [
+					"show",
+					"origin/main:sync/prompts/welcome.md",
+				]),
+			).toMatchObject({ stdout: "remote change" });
+			expect(
+				await runGit(fixture.deviceBPath, [
+					"show",
+					"origin/main:sync/prompts/extra.md",
+				]),
+			).toMatchObject({ stdout: "local extra" });
+		});
+	});
+
 	it("fast-forwards an already-detected bilateral conflict into the shared branch", async () => {
 		await withTestEnvironment(async (environment) => {
 			const fixture = await createGitFixture(environment.rootDir);

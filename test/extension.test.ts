@@ -126,6 +126,34 @@ describe("Extension registration", () => {
 		expect(typeof cmd!.handler).toBe("function");
 	});
 
+	it("filters pisync subcommands as the user types an argument", () => {
+		const api = new FakeExtensionApi();
+		register(api);
+
+		const completions = api.commands
+			.get("pisync")!
+			.getArgumentCompletions?.("pu");
+
+		expect(completions).toEqual([
+			{
+				value: "pull",
+				label: "pull",
+				description: "Pull and apply remote changes",
+			},
+			{
+				value: "push",
+				label: "push",
+				description: "Commit and push local changes",
+			},
+		]);
+		expect(
+			api.commands.get("pisync")!.getArgumentCompletions?.("unknown"),
+		).toBeNull();
+		expect(
+			api.commands.get("pisync")!.getArgumentCompletions?.("init "),
+		).toBeNull();
+	});
+
 	it("registers debug:clear-repo command", () => {
 		const api = new FakeExtensionApi();
 		register(api);
@@ -180,6 +208,34 @@ describe("pisync command routing", () => {
 		expect(showOutputOf(ctx)).toBe("");
 	});
 
+	it("does not advertise or route capture as a subcommand", async () => {
+		const api = new FakeExtensionApi();
+		register(api);
+		const ctx = createRpcContext();
+		ctx.ui.selectResponses = ["status"];
+
+		const cmd = api.commands.get("pisync")!;
+		expect(cmd.description).not.toContain("capture");
+		await cmd.handler("capture", ctx);
+
+		expect(ctx.ui.selectCalls[0]?.options).not.toContain("capture");
+		expect(notificationTextOf(ctx)).toContain("No config repo");
+	});
+
+	it("does not advertise or route rollback as a subcommand", async () => {
+		const api = new FakeExtensionApi();
+		register(api);
+		const ctx = createRpcContext();
+		ctx.ui.selectResponses = ["status"];
+
+		const cmd = api.commands.get("pisync")!;
+		expect(cmd.description).not.toContain("rollback");
+		await cmd.handler("rollback", ctx);
+
+		expect(ctx.ui.selectCalls[0]?.options).not.toContain("rollback");
+		expect(notificationTextOf(ctx)).toContain("No config repo");
+	});
+
 	it("routes to status subcommand", async () => {
 		const api = new FakeExtensionApi();
 		register(api);
@@ -204,15 +260,18 @@ describe("pisync command routing", () => {
 		expect(showOutputOf(ctx)).toContain("No config repo");
 	});
 
-	it("routes to doctor subcommand", async () => {
+	it("does not advertise or route doctor as a subcommand", async () => {
 		const api = new FakeExtensionApi();
 		register(api);
 		const ctx = createRpcContext();
+		ctx.ui.selectResponses = ["status"];
 
 		const cmd = api.commands.get("pisync")!;
+		expect(cmd.description).not.toContain("doctor");
 		await cmd.handler("doctor", ctx);
 
-		expect(showOutputOf(ctx)).toContain("No config repo");
+		expect(ctx.ui.selectCalls[0]?.options).not.toContain("doctor");
+		expect(notificationTextOf(ctx)).toContain("No config repo");
 	});
 
 	it("routes init without URL and notifies guidance", async () => {

@@ -49,7 +49,6 @@ Tests                                    76 passed
 - `src/backup.ts`
 - `src/capture.ts`
 - `src/commands.ts`（除 init 的一个 E2E 场景外）
-- `src/doctor.ts`
 - `src/glob.ts`
 - `src/inventory.ts`
 - `src/state.ts`
@@ -70,7 +69,7 @@ Tests                                    76 passed
 - capture、materialize、备份、回滚和状态持久化
 - Git 本地操作、bare remote、fast-forward、rebase 和冲突继续
 - package reconciliation 与外部 `pi` 命令
-- doctor 检查和所有用户可见格式化输出
+- 所有用户可见格式化输出
 - `scripts/bootstrap.sh`
 - npm 打包内容和 Node.js 版本兼容性
 
@@ -125,7 +124,6 @@ test/
 │   ├── lock.test.ts
 │   ├── git.test.ts
 │   ├── packages.test.ts
-│   ├── doctor.test.ts
 │   └── commands.test.ts
 ├── contract/
 │   └── extension.test.ts
@@ -321,13 +319,11 @@ P0 恢复路径不能只依靠修改文件权限触发，因为 root、Windows �
 
 - 备份清单记录 commit、reason、timestamp、内容、mode、原先不存在的路径和计划删除路径；
 - restore 同时做到：恢复被覆盖文件、重新创建被删除文件、删除 apply 新建文件；
-- rollback 前先创建当前状态备份；
 - 备份清单损坏、data 文件缺失、hash 不匹配时拒绝恢复；
 - list 按时间稳定排序，latest 正确；
 - cleanup 只删除超出保留数的旧备份，不删除进行中的备份；
 - restore 中途失败时返回清楚的恢复状态，不静默标记成功；
-- rollback 不修改 Git 历史、branch 或远端；
-- 连续 apply → rollback → 再 rollback 的行为可预测。
+- 失败恢复不修改 Git 历史、branch 或远端，且可重复执行。
 
 ### 6.8 校验：`src/validate.ts`
 
@@ -412,12 +408,6 @@ Secret scan 覆盖 GitHub/OpenAI token、JWT、Bearer token、私钥头、高置
 - 任一 reconcile 失败时 apply/pull/push 不更新完整成功状态；
 - 重试后只处理仍缺失的 package，保证幂等。
 
-### 6.13 Doctor：`src/doctor.ts`
-
-分别覆盖 Git 可用性、SSH/remote、repo 存在、origin、配置格式、settings 可移植性、pi-git-sync package 声明、文件权限、symlink、绝对路径。每项需要 pass/warn/fail，以及单项异常不阻断其他检查的聚合场景。
-
-敏感信息（remote URL 中的 token、home 路径）不得原样出现在 doctor 输出中。
-
 ### 6.14 UI：`src/ui.ts`
 
 为所有 formatter 建立稳定的 inline snapshot 或结构化断言：
@@ -426,7 +416,7 @@ Secret scan 覆盖 GitHub/OpenAI token、JWT、Bearer token、私钥头、高置
 - 13 种三方比较分类；
 - 空结果、单文件、多文件、长路径、Unicode；
 - binary diff 使用 hash/size 而不是乱码；
-- validation、secret、doctor、backup、package 和 capture 结果；
+- validation、secret、backup、package 和 capture 结果；
 - 时间使用固定时区/固定输入，测试不依赖运行机器 locale；
 - 输出排序稳定，危险操作和冲突有明确标识。
 
@@ -458,14 +448,12 @@ Secret scan 覆盖 GitHub/OpenAI token、JWT、Bearer token、私钥头、高置
 | --- | --- | --- | --- |
 | status | 未初始化、clean、dirty、ahead/behind、rebase/merge、所有 inventory 分类 | 只读；展示 repo/branch/HEAD、基线、冲突和上次同步 | P1 |
 | diff | agent、repo、Git 三类差异；text/binary/no-op | 文件级结果完整；binary 至少显示 hash/size | P1 |
-| capture | create/update/delete/no-op/conflict/denied | 不访问网络、不 commit、不更新同步完成状态 | P0 |
+| push 的捕获阶段 | create/update/delete/no-op/conflict/denied | 提交前正确暂存本地变更；由 push 统一验证、确认和推送 | P0 |
 | apply | dirty repo、冲突、验证失败、成功、多文件中途失败 | 先验证和备份；失败回滚；成功后 state/reconcile | P0 |
 | pull | 本地未 capture、up-to-date、fast-forward、diverged、fetch 失败 | 本地修改时拒绝；只允许 FF；确认前不修改 agent | P0 |
 | push | 首推、no-op、clean rebase、远端不存在、secret、push 失败 | 顺序严格；失败不 apply、不更新 state | P0 |
 | push --continue | 无 pending、有 unmerged、worktree dirty、解决完成、已 abort | 绝不重新 capture；最终 scan/push/apply；冲突时不 reload | P0 |
 | init | 空 remote、已有合法 repo、重复 init、URL 不匹配、`--force`、clone 失败 | 幂等；保留/重建规则正确；不会把配置仓库装成 Pi Package | P0 |
-| doctor | 所有检查组合和局部异常 | 聚合全部检查，不产生副作用 | P1 |
-| rollback | 无备份、列表、确认取消、恢复成功、恢复失败 | 先备份当前状态；不改 Git 历史；成功才 reload | P0 |
 | clearRepo | 取消、成功、local/remote 失败 | 只在显式确认后执行；保留 `.git`；错误不伪装成功 | P1 |
 
 ### 7.3 Push 顺序断言
@@ -617,7 +605,7 @@ Windows symlink 测试若 runner 无创建权限，应明确 skip 原因；路�
 
 - 对 path、glob 和 package source 增加表驱动攻击样本；条件允许时引入 property-based/fuzz 测试。
 - 仓库内运行 secret scanner，确保测试 fixture 使用明确的假 token，不提交真实凭证。
-- 日志、doctor 和错误信息执行脱敏断言。
+- 日志和错误信息执行脱敏断言。
 - `npm pack` 检查不包含 test 临时目录、`.pi-sync`、fixture secret 或本机路径。
 
 ## 11. Bootstrap 与发布测试
@@ -722,7 +710,7 @@ CI 建议：
 ### 阶段 3：Git 与命令链路
 
 - 补齐真实 Git remote、FF/diverge/rebase/conflict/continue。
-- 覆盖 status/diff/capture/apply/pull/push/init/doctor/rollback。
+- 覆盖 status/diff/capture/apply/pull/push/init。
 - 补齐 package reconciliation 和参数注入测试。
 
 **退出条件**：所有命令 P0 顺序、停止点、state 与 reload 规则有断言。

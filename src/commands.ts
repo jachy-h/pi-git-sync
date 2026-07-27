@@ -40,7 +40,7 @@ import {
 import { loadPiSyncConfig } from "./config.ts";
 import type { PiSyncConfig } from "./config.ts";
 import { planMaterialize, executeMaterialize } from "./materialize.ts";
-import { createBackup, listBackups, restoreBackup } from "./backup.ts";
+import { createBackup, restoreBackup } from "./backup.ts";
 import { SyncLock } from "./lock.ts";
 import { scanSecrets } from "./security.ts";
 import { ensureDeviceId, loadState, saveState, updateState } from "./state.ts";
@@ -49,7 +49,6 @@ import type { CommandResult, ResultCode } from "./operation-result.ts";
 import { captureChanges } from "./capture.ts";
 import { compareFiles, hasLocalChanges, sha256 } from "./inventory.ts";
 import { validateFiles } from "./validate.ts";
-import { runDoctorChecks } from "./doctor.ts";
 import {
 	getPackageDiff,
 	preparePackagePlan,
@@ -62,11 +61,8 @@ import {
 	formatGitStatus,
 	formatSyncStatusV2,
 	formatComparisonDiff,
-	formatDoctorResult,
 	formatSecretsFindings,
-	formatBackupList,
 	formatValidationErrors,
-	formatCaptureResult,
 } from "./ui.ts";
 
 // ========== 路径工具 ==========
@@ -282,6 +278,53 @@ export class PiSyncCommands {
 		].join("\n");
 	}
 
+	private formatMergedConflictMessage(config: PiSyncConfig): string {
+		return [
+			"Sync conflict resolved by automatically merging current-device changes.",
+			`The merged version was published to ${config.branch}.`,
+		].join("\n");
+	}
+
+	/**
+	 * Merge a published device snapshot into the shared branch without requiring
+	 * user intervention. A real content conflict is aborted, leaving both remote
+	 * branches intact for the existing manual-resolution fallback.
+	 */
+	private async mergeDeviceBranchIntoShared(
+		repoPath: string,
+		config: PiSyncConfig,
+		deviceBranch: string,
+	): Promise<boolean> {
+		try {
+			await gitExec(repoPath, ["merge", "--no-edit", `origin/${deviceBranch}`]);
+		} catch (error) {
+			const output =
+				error instanceof GitCommandError
+					? `${error.stdout}\n${error.stderr}`
+					: "";
+			if (!/CONFLICT|Automatic merge failed/i.test(output)) throw error;
+			await gitExec(repoPath, ["merge", "--abort"]);
+			return false;
+		}
+
+		try {
+			await this.pushMainAndDeviceBranches(repoPath, config.branch);
+			return true;
+		} catch (error) {
+			const output =
+				error instanceof GitCommandError
+					? `${error.stdout}\n${error.stderr}`
+					: "";
+			if (!/rejected|fetch first|non-fast-forward/i.test(output)) throw error;
+
+			// Preserve the published device snapshot but discard the local merge,
+			// which was invalidated by a concurrent shared-branch update.
+			await gitFetch(repoPath);
+			await gitExec(repoPath, ["reset", "--hard", `origin/${config.branch}`]);
+			return false;
+		}
+	}
+
 	/** Save and publish current-device changes, fast-forwarding the shared branch when safe. */
 	private async preserveConflictOnDeviceBranch(
 		repoPath: string,
@@ -464,61 +507,6 @@ export class PiSyncCommands {
 		return lines.join("\n");
 	}
 
-	// ========== capture ==========
-
-	async capture(repoPath?: string): Promise<string> {
-		const rp = repoPath ?? (await getRepoPath());
-		const config = await loadPiSyncConfig(rp);
-		const state = await loadState(this.agentDir);
-
-		const acquired = await this.lock.acquire("capture", 5000);
-		if (!acquired) {
-			const existing = await this.lock.readLock();
-			return `Another sync operation is in progress: ${existing?.operation} (PID ${existing?.pid}, started ${existing?.startedAt})`;
-		}
-
-		try {
-			try {
-				await ensureConfiguredBranch(rp, config.branch);
-			} catch (error) {
-				return `Capture blocked: ${error instanceof Error ? error.message : "Configured branch check failed."}`;
-			}
-			const status = await gitStatus(rp);
-			const result = await this.captureWithScaffoldCalibration(
-				rp,
-				config,
-				state,
-				this.shouldRefreshLocalCapture(status, state),
-			);
-
-			if (result.hasConflicts) {
-				try {
-					const preservation = await this.preserveConflictOnDeviceBranch(
-						rp,
-						config,
-						state,
-					);
-					if (preservation.fastForwarded) {
-						const applyResult = await this.applyCurrent(
-							rp,
-							config,
-							state,
-							"capture",
-						);
-						return `${this.formatFastForwardedConflictMessage(config)}\n${applyResult.message}`;
-					}
-					return this.formatManualMergeMessage(rp, config, preservation.branch);
-				} catch (error) {
-					return `Could not create a current-device conflict branch: ${error instanceof Error ? error.message : "Unknown error"}`;
-				}
-			}
-
-			return formatCaptureResult(result);
-		} finally {
-			await this.lock.release();
-		}
-	}
-
 	// ========== apply ==========
 
 	async apply(
@@ -669,6 +657,25 @@ export class PiSyncCommands {
 							return {
 								...applyResult,
 								message: `${this.formatFastForwardedConflictMessage(config)}\n${applyResult.message}`,
+							};
+						}
+						if (
+							await this.mergeDeviceBranchIntoShared(
+								rp,
+								config,
+								preservation.branch,
+							)
+						) {
+							const applyResult = await this.applyCurrent(
+								rp,
+								config,
+								state,
+								"pull",
+								packageApproval,
+							);
+							return {
+								...applyResult,
+								message: `${this.formatMergedConflictMessage(config)}\n${applyResult.message}`,
 							};
 						}
 						return {
@@ -897,7 +904,19 @@ export class PiSyncCommands {
 						config,
 						state,
 					);
+					let resolutionMessage: string | null = null;
 					if (preservation.fastForwarded) {
+						resolutionMessage = this.formatFastForwardedConflictMessage(config);
+					} else if (
+						await this.mergeDeviceBranchIntoShared(
+							rp,
+							config,
+							preservation.branch,
+						)
+					) {
+						resolutionMessage = this.formatMergedConflictMessage(config);
+					}
+					if (resolutionMessage) {
 						const applyResult = await this.applyCurrent(
 							rp,
 							config,
@@ -913,7 +932,7 @@ export class PiSyncCommands {
 							worktreeFingerprint: "",
 							repoPath: rp,
 							branch: config.branch,
-							message: `${this.formatFastForwardedConflictMessage(config)}\n${applyResult.message}`,
+							message: `${resolutionMessage}\n${applyResult.message}`,
 						};
 					}
 					return {
@@ -1158,17 +1177,47 @@ export class PiSyncCommands {
 								rp,
 								config,
 							);
+							if (
+								!(await this.mergeDeviceBranchIntoShared(rp, config, branch))
+							) {
+								return {
+									ok: false,
+									code: "blocked_conflict",
+									message: this.formatManualMergeMessage(rp, config, branch),
+									reload: false,
+								};
+							}
+
+							const newState = await loadState(this.agentDir);
+							const applyResult = await this.applyCurrent(
+								rp,
+								config,
+								newState,
+								"push",
+							);
+							if (!applyResult.ok) {
+								return {
+									ok: false,
+									code: applyResult.code,
+									message:
+										"Push completed, but applying the synced configuration failed.\n" +
+										this.formatMergedConflictMessage(config) +
+										"\n" +
+										applyResult.message,
+									reload: false,
+								};
+							}
 							return {
-								ok: false,
-								code: "blocked_conflict",
-								message: this.formatManualMergeMessage(rp, config, branch),
-								reload: false,
+								ok: true,
+								code: "ok",
+								message: `Pushed successfully.\n${this.formatMergedConflictMessage(config)}\n${applyResult.message}`,
+								reload: applyResult.reload,
 							};
 						} catch (error) {
 							return {
 								ok: false,
 								code: "git_failed",
-								message: `Could not create a current-device conflict branch: ${error instanceof Error ? error.message : "Unknown error"}`,
+								message: `Could not create or merge a current-device conflict branch: ${error instanceof Error ? error.message : "Unknown error"}`,
 								reload: false,
 							};
 						}
@@ -1808,54 +1857,6 @@ export class PiSyncCommands {
 		}
 	}
 
-	// ========== doctor ==========
-
-	async doctor(repoPath?: string): Promise<string> {
-		const rp = repoPath ?? (await getRepoPathSafe(this.agentDir));
-		if (!rp) return "No config repo configured.";
-
-		const config = await loadPiSyncConfig(rp);
-		const result = await runDoctorChecks(rp, this.agentDir, config);
-		return formatDoctorResult(result);
-	}
-
-	// ========== rollback ==========
-
-	async rollback(repoPath?: string): Promise<string> {
-		const rp = repoPath ?? (await getRepoPathSafe(this.agentDir));
-		if (!rp) return "No config repo configured.";
-
-		const acquired = await this.lock.acquire("rollback", 5000);
-		if (!acquired) {
-			return "Another sync operation is in progress.";
-		}
-
-		try {
-			const backups = await listBackups(this.agentDir);
-			if (backups.length === 0) {
-				return "No backups available for rollback.";
-			}
-
-			const latestBackup = backups[0]!;
-
-			// 先创建当前状态备份
-			const commit = await getHeadCommit(rp).catch(() => "unknown");
-			await createBackup(this.agentDir, commit, "pre-rollback");
-
-			// 恢复
-			await restoreBackup(this.agentDir, latestBackup);
-
-			return `Rolled back to backup: ${latestBackup.timestamp}\nCommit: ${latestBackup.commit}\nReason: ${latestBackup.reason}`;
-		} finally {
-			await this.lock.release();
-		}
-	}
-
-	async rollbackList(): Promise<string> {
-		const backups = await listBackups(this.agentDir);
-		return formatBackupList(backups);
-	}
-
 	// ========== debug: clear-repo ==========
 
 	async clearRepo(
@@ -2080,6 +2081,25 @@ export class PiSyncCommands {
 						return {
 							...resolved,
 							message: `${this.formatFastForwardedConflictMessage(config)}\n${resolved.message}`,
+						};
+					}
+					if (
+						await this.mergeDeviceBranchIntoShared(
+							rp,
+							config,
+							preservation.branch,
+						)
+					) {
+						const resolved = await this.applyCurrent(
+							rp,
+							config,
+							state,
+							reason,
+							packageApproval,
+						);
+						return {
+							...resolved,
+							message: `${this.formatMergedConflictMessage(config)}\n${resolved.message}`,
 						};
 					}
 					errorLines.push(

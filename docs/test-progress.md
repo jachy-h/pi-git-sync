@@ -74,19 +74,12 @@ verifyCapture 安全路径、backup/restore 的路径/缺失数据/hash 校验�
 - `test/commands-status-diff.test.ts` (8 tests)
   - status：无配置、仓库信息、本地变更、远端 ahead/behind、无 origin remote。
   - diff：无配置、文件比较 + git status + remote diff、无 remote 优雅降级。
-- `test/commands-rollback.test.ts` (6 tests)
-  - rollback：无配置、无备份、apply 后回滚、Git history 不被修改、
-    rollback 创建 pre-rollback 备份。
-  - rollbackList：空列表显示。
-- `test/commands-doctor.test.ts` (5 tests)
-  - doctor：无配置、仓库诊断报告、无 remote 仓库、
-    非可移植绝对 package 路径警告、缺少 pi-git-sync 警告。
 - `test/ui.test.ts` (19 tests)
   - formatGitStatus（clean/dirty/rebase/merge/无remote）、
     formatComparisonDiff（空/多种变更/仅 no_change）、
     formatSyncStatusV2（完整/含 pending/packages diff）、
     formatSecretsFindings（多项/空）、formatValidationErrors（error/warning/空）、
-    formatBackupList（多项/空）、formatCaptureResult（capture/delete/denied/conflict/空）。
+    formatCaptureResult（capture/delete/denied/conflict/空）。
 
 ## 当前质量基线
 
@@ -118,7 +111,7 @@ npm run test:coverage   Statements/Lines 80.96%, Branches 78.08%, Functions 90.3
 
 - `test/extension.test.ts` (21 tests)
   - Extension 注册：pisync/debug:clear-repo 命令、session_start/shutdown 事件、status 清理。
-  - 参数路由：empty/unknown → menu、status/diff/doctor → showOutput、
+  - 参数路由：empty/unknown → menu、status/diff → 输出、
     init/init --force → 交互式输入/取消、push --continue → 参数转发。
   - 交互确认：debug:clear-repo 取消/确认、push 确认流程。
   - reload 生命周期：push 成功后 reload、失败/无变更不 reload。

@@ -189,7 +189,7 @@ GitHub Private Repository 不是秘密加密存储。Secret scanner 只能作为
 }
 ```
 
-`doctor` 应将以下情况视为错误或高优先级警告：
+同步前校验应将以下情况视为错误或高优先级警告：
 
 - `settings.json` 出现绝对本地 package 路径。
 - 出现明显的 home 目录或设备专属路径。
@@ -269,9 +269,9 @@ R = 当前 repo 文件
 包括“不存在”在内，按内容 hash 判断：
 
 | 本地 L | 仓库 R | 结论 |
-|---|---|---|
+| --- | --- | --- |
 | `L = B` | `R = B` | 无变化 |
-| `L ≠ B` | `R = B` | 仅本地变化，可 capture |
+| `L ≠ B` | `R = B` | 仅本地变化，可由 push 捕获 |
 | `L = B` | `R ≠ B` | 仅仓库变化，可 apply |
 | `L = R` | 两者均不同于 B | 已自然收敛 |
 | `L ≠ B` | `R ≠ B` 且 `L ≠ R` | 双边修改，停止 |
@@ -319,9 +319,9 @@ Git changes and conflicts
 
 必须展示真实文件级 diff；二进制文件至少展示 hash 和大小变化。
 
-### 11.3 `/pisync capture`
+### 11.3 `/pisync push` 的捕获阶段
 
-只执行本地到 repo 工作树的捕获，不访问网络、不 commit、不 push：
+`/pisync push` 在提交前执行本地到 repo 工作树的捕获，并展示待推送 diff：
 
 1. 获取同步锁。
 2. 扫描 agent 和 repo 的白名单文件集合。
@@ -329,9 +329,7 @@ Git changes and conflicts
 4. 双边修改时停止，不覆盖任一方。
 5. 把仅本地修改复制到 repo。
 6. 把 agent 中对已管理文件的删除反映到 repo。
-7. 校验捕获结果并展示 Git diff。
-
-`capture` 适合首次迁移和高级用户检查。日常 `/pisync push` 可以内置 capture。
+7. 校验捕获结果，再确认、commit 和 push。
 
 ### 11.4 `/pisync apply`
 
@@ -365,7 +363,7 @@ Git changes and conflicts
 1. 获取同步锁。
 2. 检查 repo 工作树和 Git 操作状态。
 3. 检查 agent 相对基线是否有本地修改。
-4. 如果 agent 有未捕获修改，停止并提示先 push、capture 或放弃本地修改。
+4. 如果 agent 有未捕获修改，停止并提示先 push 或放弃本地修改。
 5. 执行 `git fetch origin`。
 6. 检查本地 main 与 `origin/main` 的关系。
 7. 仅允许 fast-forward；分叉时停止。
@@ -422,20 +420,7 @@ Push 前的确认必须发生在 commit 和远端副作用之前。
 → reload
 ```
 
-如果用户执行 `git rebase --abort`，下次 status/doctor 应识别并清理已失效的 pending 状态。
-
-### 11.8 `/pisync rollback`
-
-Rollback 只恢复 agent 配置，不重写 Git 历史：
-
-1. 显示目标备份。
-2. 请求确认。
-3. 先备份当前 agent 状态。
-4. 恢复所选备份。
-5. 校验恢复后的配置。
-6. reload。
-
-如需回退共享配置版本，应使用 Git revert 或 checkout 后再 apply。
+如果用户执行 `git rebase --abort`，下次 status 应识别并清理已失效的 pending 状态。
 
 ## 12. 冲突原则
 
@@ -482,7 +467,7 @@ $PI_CODING_AGENT_DIR/.pi-sync/backups/<timestamp>/
 - repo commit。
 - 操作类型。
 
-这样 rollback 才能同时恢复覆盖、删除本次新建文件和重新创建本次删除文件。
+这样失败恢复才能同时恢复覆盖、删除本次新建文件和重新创建本次删除文件。
 
 ### 13.3 并发锁
 
@@ -579,7 +564,6 @@ src/
 ├── security.ts        # hard deny 和 secret scan
 ├── packages.ts        # package 声明 reconcile
 ├── state.ts           # 基线、hash 和 pending operation
-├── doctor.ts          # 环境、路径和可移植性检查
 ├── commands.ts        # 命令编排，不包含底层文件逻辑
 └── ui.ts              # diff、确认和结果展示
 ```
@@ -620,8 +604,7 @@ src/
 
 - 从旧 schema 生成新 `sync/` 镜像。
 - 检测并移除配置 repo 的重复本地 Package 加载声明。
-- doctor 可移植性检查。
-- 备份列表和 rollback UI。
+- 同步前的可移植性检查。
 
 ## 18. 测试要求
 

@@ -4,7 +4,6 @@
  * 为各种命令生成格式化的展示输出
  */
 import type { GitStatus } from "./git.ts";
-import type { DoctorResult } from "./doctor.ts";
 import type { PackageDiff } from "./packages.ts";
 import type { PiSyncConfig } from "./config.ts";
 import type { SyncState } from "./state.ts";
@@ -362,29 +361,6 @@ export function formatSettingsChanges(
 	return lines.join("\n");
 }
 
-// ========== Doctor ==========
-
-export function formatDoctorResult(result: DoctorResult): string {
-	const lines: string[] = [
-		`Diagnostic Results: ${result.summary.ok} ok, ${result.summary.warning} warning(s), ${result.summary.error} error(s)`,
-		"",
-	];
-
-	for (const check of result.checks) {
-		const icon =
-			check.status === "ok" ? "✓" : check.status === "warning" ? "⚠" : "✗";
-		const prefix =
-			check.status === "error"
-				? "ERROR"
-				: check.status === "warning"
-					? "WARN"
-					: " OK ";
-		lines.push(`  [${prefix}] ${icon} ${check.name}: ${check.message}`);
-	}
-
-	return lines.join("\n");
-}
-
 // ========== 秘密扫描 ==========
 
 export function formatSecretsFindings(
@@ -399,22 +375,6 @@ export function formatSecretsFindings(
 	for (const finding of findings) {
 		const lineInfo = finding.line ? `:${finding.line}` : "";
 		lines.push(`  [${finding.type}] ${finding.file}${lineInfo}`);
-	}
-	return lines.join("\n");
-}
-
-// ========== 备份列表 ==========
-
-export function formatBackupList(
-	backups: Array<{ timestamp: string; commit: string; reason: string }>,
-): string {
-	if (backups.length === 0) return "No backups available.";
-
-	const lines: string[] = ["Available backups:"];
-	for (let i = 0; i < backups.length; i++) {
-		const b = backups[i]!;
-		const date = b.timestamp.replace("T", " ").replace(/-\d{2}-\d{2}$/, "");
-		lines.push(`  [${i}] ${date} - ${b.commit.substring(0, 7)} - ${b.reason}`);
 	}
 	return lines.join("\n");
 }

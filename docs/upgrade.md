@@ -9,8 +9,8 @@ compatible, but the local sync state changes from schema v2 to schema v3.
 
 1. Ensure Pi `0.82.1` or newer and Node.js `>=22.19.0` are installed.
 2. Make sure the config repository is clean and pushed.
-3. Run `/pisync doctor` and keep a copy of the agent directory if the repository contains
-   custom extensions or packages.
+3. Keep a copy of the agent directory if the repository contains custom extensions or
+   packages.
 
 ## State migration
 
@@ -24,14 +24,13 @@ On the first command that loads state, pi-git-sync:
    a path is unavailable, or a symlink is encountered.
 6. Atomically writes the migrated v3 state.
 
-A migration conflict is intentionally not resolved automatically. Use `/pisync status` and
-`/pisync doctor`, resolve the file manually, then run the appropriate capture or apply
-command.
+A migration conflict is intentionally not resolved automatically. Use `/pisync status`,
+resolve the file manually, then run `/pisync push` or `/pisync pull` as appropriate.
 
 ## Branch behavior
 
-`pi-sync.json.branch` is now the single target branch for init, status, pull, push, rebase,
-and doctor. The tool no longer infers the target from the current branch or assumes `main`.
+`pi-sync.json.branch` is now the single target branch for init, status, pull, push, and
+rebase. The tool no longer infers the target from the current branch or assumes `main`.
 A clean worktree may be switched to the configured branch. Dirty, merge, and rebase states
 are blocked instead of being switched automatically.
 
@@ -91,5 +90,5 @@ npm audit --omit=dev --audit-level=high
 npm audit --audit-level=high
 ```
 
-Then run `/pisync doctor` and confirm that the configured branch, repository path, pending
-operation state, package trust, and path safety checks are healthy.
+Then run `/pisync status` and confirm that the configured branch, repository path, and
+pending operation state are healthy.

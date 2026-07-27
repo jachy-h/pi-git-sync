@@ -322,7 +322,7 @@ function migrateV1ToV2(v1: Record<string, unknown>): Record<string, unknown> {
  *
  * v2 的 baseline 可能来自一次未完成的 apply，因此不能直接相信旧 hash。
  * 只有 agent 与 repo 当前内容 hash 相同，或两边都不存在时，才自动收敛；
- * 其他情况保留旧 baseline，并把路径写入 migrationReport 供 doctor/status 处理。
+ * 其他情况保留旧 baseline，并把路径写入 migrationReport 供 status 处理。
  */
 async function migrateV2ToV3(
 	v2: Record<string, unknown>,
