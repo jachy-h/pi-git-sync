@@ -11,7 +11,9 @@ import { randomUUID } from "node:crypto";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import type { PiSyncConfig } from "./config.ts";
+import { getOperationSignal } from "./operation-context.ts";
 import { resolveRepoSyncRoot, resolveWithinRoot } from "./path-safety.ts";
+export { isPortablePackageSource } from "./settings-portability.ts";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -57,19 +59,6 @@ export interface ReconcileResult {
 }
 
 // ========== 安全解析 ==========
-
-/**
- * Returns true when a package source is NOT a local path (i.e. it is safe to
- * synchronise across machines).  Local sources — absolute paths, relative paths,
- * and file: URIs — are inherently machine-specific and must never land in a
- * shared repository.
- */
-export function isPortablePackageSource(source: string): boolean {
-	if (typeof source !== "string" || source.length === 0) return false;
-	if (/[\u0000-\u001f\u007f]/.test(source)) return false;
-	if (/^(?:file:|\.\.?[\\/]|[\\/]|~[\\/])/i.test(source)) return false;
-	return /^(?:npm:|git:|https?:\/\/|ssh:\/\/)/i.test(source);
-}
 
 function validatePackageSource(source: unknown): string {
 	if (typeof source !== "string" || source.length === 0) {
@@ -332,10 +321,12 @@ export interface ReconcileOptions {
 	approval?: PackageApproval;
 	/** 非交互入口默认 true，禁止隐式安装。 */
 	nonInteractive?: boolean;
+	signal?: AbortSignal;
 }
 
 export interface PackageExecutionOptions {
 	approval?: PackageApproval;
+	signal?: AbortSignal;
 }
 
 interface PackageAction {
@@ -402,6 +393,7 @@ export async function executePackagePlan(
 	options: PackageExecutionOptions = {},
 ): Promise<ReconcileResult> {
 	const result: ReconcileResult = { installed: [], errors: [] };
+	const signal = options.signal ?? getOperationSignal();
 
 	if (plan.approvalRequired.length > 0) {
 		const approval = options.approval;
@@ -420,15 +412,21 @@ export async function executePackagePlan(
 	].filter((source) => !isBuiltInTrustedSource(source));
 	if (toInstall.length === 0) return result;
 
-	if (!(await isPiCliAvailable())) {
+	if (!(await isPiCliAvailable(signal))) {
 		result.errors.push(
-			`pi CLI not available. Run manually: ${toInstall.map((pkg) => `pi install ${pkg}`).join("; ")}`,
+			signal?.aborted
+				? "Package installation cancelled."
+				: `pi CLI not available. Run manually: ${toInstall.map((pkg) => `pi install ${pkg}`).join("; ")}`,
 		);
 		return result;
 	}
 
 	const actions: PackageAction[] = [];
 	for (const source of toInstall) {
+		if (signal?.aborted) {
+			result.errors.push("Package installation cancelled.");
+			break;
+		}
 		const changed = plan.changed.find(
 			(entry) => entry.remote.source === source,
 		);
@@ -442,20 +440,29 @@ export async function executePackagePlan(
 				await execFileAsync("pi", ["remove", normalizePackageName(source)], {
 					env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
 					timeout: 60000,
-				}).catch(() => undefined);
+					signal,
+				}).catch((error: unknown) => {
+					if (signal?.aborted) throw error;
+				});
 			}
 			await execFileAsync("pi", ["install", source], {
 				env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
 				timeout: 120000,
+				signal,
 			});
 			result.installed.push(source);
 		} catch (error) {
-			result.errors.push(`Failed to install ${source}: ${String(error)}`);
+			result.errors.push(
+				signal?.aborted
+					? `Package installation cancelled while processing ${source}.`
+					: `Failed to install ${source}: ${String(error)}`,
+			);
 		}
 		actions.push(action);
+		if (signal?.aborted) break;
 	}
 
-	if (result.errors.length > 0) {
+	if (result.errors.length > 0 && !signal?.aborted) {
 		const rollback = await rollbackPackageActions(actions, agentDir);
 		if (rollback.rolledBack.length > 0) result.rolledBack = rollback.rolledBack;
 		if (rollback.errors.length > 0) {
@@ -494,13 +501,17 @@ export async function reconcilePackages(
 	options: ReconcileOptions = {},
 ): Promise<ReconcileResult> {
 	const plan = await preparePackagePlan(repoPath, agentDir, config);
-	return executePackagePlan(plan, agentDir, { approval: options.approval });
+	return executePackagePlan(plan, agentDir, {
+		approval: options.approval,
+		signal: options.signal,
+	});
 }
 
-async function isPiCliAvailable(): Promise<boolean> {
+async function isPiCliAvailable(signal?: AbortSignal): Promise<boolean> {
 	try {
 		const { stdout } = await execFileAsync("pi", ["--version"], {
 			timeout: 10000,
+			signal,
 		});
 		return stdout.trim().length > 0;
 	} catch {

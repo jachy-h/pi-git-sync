@@ -1,8 +1,11 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extension from "../index.ts";
+import { PiSyncCommands } from "../src/commands.ts";
+import type { RunResult } from "../src/operation-result.ts";
 import {
 	FakeExtensionApi,
 	FakeCommandContext,
@@ -93,11 +96,14 @@ const config = {
 	security: { scanSecretsBeforePush: false },
 } as const;
 
-async function seedConfigRepo(repoPath: string): Promise<void> {
+async function seedConfigRepo(
+	repoPath: string,
+	configOverride: Record<string, unknown> = config,
+): Promise<void> {
 	await mkdir(join(repoPath, "sync/prompts"), { recursive: true });
 	await writeFile(
 		join(repoPath, "pi-sync.json"),
-		JSON.stringify(config),
+		JSON.stringify(configOverride),
 		"utf-8",
 	);
 	await writeFile(join(repoPath, "sync/prompts/welcome.md"), "base\n", "utf-8");
@@ -478,7 +484,265 @@ describe.sequential("Extension push command interaction flow", () => {
 	});
 });
 
+describe.sequential("pisync running UI", () => {
+	it("prints elapsed time in conversation messages while a command is running", async () => {
+		vi.useFakeTimers();
+		let finishRun!: (result: RunResult) => void;
+		const runSpy = vi
+			.spyOn(PiSyncCommands.prototype, "run")
+			.mockImplementation(async (options) => {
+				options?.onProgress?.("pull", "Waiting for Git...");
+				return await new Promise<RunResult>((resolve) => {
+					finishRun = resolve;
+				});
+			});
+		try {
+			const api = new FakeExtensionApi();
+			register(api);
+			const ctx = createRpcContext();
+			const pending = api.commands.get("pisync")!.handler(undefined, ctx);
+
+			await vi.advanceTimersByTimeAsync(2_100);
+			finishRun({
+				ok: true,
+				code: "noop",
+				message: "Done",
+				reload: false,
+				mode: "sync",
+				phase: "complete",
+			});
+			await pending;
+
+			expect(notificationTextOf(ctx)).toContain(
+				"pi-sync [00:02] Waiting for Git...",
+			);
+			expect(ctx.ui.statusUpdates).toEqual([]);
+		} finally {
+			runSpy.mockRestore();
+			vi.useRealTimers();
+		}
+	});
+
+	it("prints each phase and Git command in conversation messages", async () => {
+		const runSpy = vi
+			.spyOn(PiSyncCommands.prototype, "run")
+			.mockImplementation(async (options) => {
+				options?.onProgress?.("preflight", "Checking sync state...");
+				options?.onProgress?.("pull", "Pulling remote changes...");
+				options?.onGitCommandStart?.("pull", "git fetch origin", 10_000);
+				return {
+					ok: true,
+					code: "noop",
+					message: "Done",
+					reload: false,
+					mode: "sync",
+					phase: "complete",
+				};
+			});
+		try {
+			const api = new FakeExtensionApi();
+			register(api);
+			const ctx = createRpcContext();
+			await api.commands.get("pisync")!.handler(undefined, ctx);
+
+			const messages = notificationTextOf(ctx);
+			expect(messages).toContain("Checking sync state...");
+			expect(
+				ctx.ui.notifications.filter((notification) =>
+					notification.message.includes("Checking sync state..."),
+				),
+			).toHaveLength(1);
+			expect(messages).toContain("Pulling remote changes...");
+			expect(messages).toContain("Running: git fetch origin (timeout: 10s)...");
+			expect(ctx.ui.statusUpdates).toEqual([]);
+		} finally {
+			runSpy.mockRestore();
+		}
+	});
+
+	it("hard-stops a run at 60 seconds", async () => {
+		vi.useFakeTimers();
+		let observedSignal: AbortSignal | undefined;
+		let handlerSettled = false;
+		const runSpy = vi
+			.spyOn(PiSyncCommands.prototype, "run")
+			.mockImplementation(async (options) => {
+				const signal = options?.signal;
+				observedSignal = signal;
+				return await new Promise<RunResult>((resolve) => {
+					signal?.addEventListener(
+						"abort",
+						() =>
+							resolve({
+								ok: false,
+								code: "partial_failure",
+								message: "underlying command aborted",
+								reload: false,
+								mode: "sync",
+								phase: "preflight",
+							}),
+						{ once: true },
+					);
+				});
+			});
+		try {
+			const api = new FakeExtensionApi();
+			register(api);
+			const ctx = createRpcContext();
+			const pending = Promise.resolve(
+				api.commands.get("pisync")!.handler(undefined, ctx),
+			).then(() => {
+				handlerSettled = true;
+			});
+
+			await vi.advanceTimersByTimeAsync(59_999);
+			expect(handlerSettled).toBe(false);
+			expect(observedSignal?.aborted).toBe(false);
+
+			await vi.advanceTimersByTimeAsync(1);
+			await pending;
+
+			expect(observedSignal?.aborted).toBe(true);
+			expect(notificationTextOf(ctx)).toContain(
+				"pi-sync exceeded 60 seconds and was stopped during preflight.",
+			);
+			expect(ctx.ui.statusUpdates).toEqual([]);
+		} finally {
+			runSpy.mockRestore();
+			vi.useRealTimers();
+		}
+	});
+
+	it("aborts the running command when Escape is pressed", async () => {
+		let observedSignal: AbortSignal | undefined;
+		let started!: () => void;
+		const runStarted = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const runSpy = vi
+			.spyOn(PiSyncCommands.prototype, "run")
+			.mockImplementation(async (options) => {
+				const signal = options?.signal;
+				observedSignal = signal;
+				started();
+				return await new Promise<RunResult>((resolve) => {
+					signal?.addEventListener(
+						"abort",
+						() =>
+							resolve({
+								ok: false,
+								code: "partial_failure",
+								message: "aborted",
+								reload: false,
+								mode: "sync",
+								phase: "pull",
+							}),
+						{ once: true },
+					);
+				});
+			});
+		try {
+			const api = new FakeExtensionApi();
+			register(api);
+			const ctx = new FakeCommandContext("tui");
+			const pending = api.commands.get("pisync")!.handler(undefined, ctx);
+			await runStarted;
+			ctx.ui.emitTerminalInput("\u001b");
+			await pending;
+
+			expect(observedSignal?.aborted).toBe(true);
+			expect(notificationTextOf(ctx)).toContain(
+				"pi-sync: Cancelled after 00:00.",
+			);
+			expect(ctx.ui.statusUpdates).toEqual([]);
+		} finally {
+			runSpy.mockRestore();
+		}
+	});
+});
+
 describe.sequential("Extension pull command interaction flow", () => {
+	it.skipIf(process.platform === "win32")(
+		"returns control to Pi and accepts the next command after pull timeout",
+		async () => {
+			await withTestEnvironment(async (environment) => {
+				const fixture = await createGitFixture(environment.rootDir);
+				await seedConfigRepo(fixture.deviceAPath, {
+					...config,
+					pullTimeoutMs: 75,
+				});
+				await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
+				await runGit(fixture.deviceBPath, ["pull", "--ff-only"]);
+				const { sha256 } = await import("../src/inventory.ts");
+				await environment.writeAgentFile("prompts/welcome.md", "base\n");
+				const settings = JSON.stringify({
+					packages: ["npm:@jachy/pi-git-sync"],
+				});
+				await environment.writeAgentFile("settings.json", settings);
+				await saveState(
+					environment.agentDir,
+					createSyncState({
+						repoPath: fixture.deviceBPath,
+						files: {
+							"prompts/welcome.md": {
+								sha256: sha256("base\n"),
+								mode: 0o644,
+							},
+							"settings.json": {
+								sha256: sha256(settings),
+								mode: 0o644,
+							},
+						},
+					}),
+				);
+
+				const realGit = execFileSync("which", ["git"], {
+					encoding: "utf-8",
+				}).trim();
+				await environment.writeExecutable(
+					"git",
+					`#!/bin/sh\nif [ "$1" = "merge" ]; then\n  sh -c 'sleep 30 & wait'\n  exit 0\nfi\nexec ${JSON.stringify(realGit)} "$@"\n`,
+				);
+
+				const api = new FakeExtensionApi();
+				register(api);
+				const ctx = createRpcContext();
+				const command = api.commands.get("pisync")!;
+				const nativeSetTimeout = globalThis.setTimeout;
+				// Simulate a broken child-process timeout. The independent command
+				// watchdog must still abort Git and return control to Pi.
+				const timeoutSpy = vi
+					.spyOn(globalThis, "setTimeout")
+					.mockImplementation(((
+						...parameters: Parameters<typeof setTimeout>
+					) => {
+						const [callback, delay, ...args] = parameters;
+						return nativeSetTimeout(
+							callback,
+							delay === 75 ? 30_000 : delay,
+							...args,
+						);
+					}) as typeof setTimeout);
+				const startedAt = Date.now();
+				try {
+					await command.handler(undefined, ctx);
+				} finally {
+					timeoutSpy.mockRestore();
+				}
+
+				expect(Date.now() - startedAt).toBeLessThan(1_500);
+				expect(notificationTextOf(ctx)).toContain(
+					"timed out after 75 ms. Sync stopped.",
+				);
+				expect(ctx.ui.statusUpdates).toEqual([]);
+
+				// This second command represents the next message submitted in Pi.
+				await expect(command.handler("status", ctx)).resolves.toBeUndefined();
+				expect(notificationTextOf(ctx)).toContain("=== pi-git-sync Status ===");
+			});
+		},
+	);
+
 	it("pull flow: notifies result", async () => {
 		await withTestEnvironment(async (environment) => {
 			const fixture = await createGitFixture(environment.rootDir);

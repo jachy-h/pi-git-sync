@@ -25,7 +25,7 @@ import {
 import { normalizePath, isPathAllowed } from "./glob.ts";
 import { isDenied } from "./security.ts";
 import { resolveRepoSyncRoot, resolveWithinRoot } from "./path-safety.ts";
-import { isPortablePackageSource } from "./packages.ts";
+import { sanitizeSettingsForRepository } from "./settings-portability.ts";
 
 export interface CaptureResult {
 	/** 已捕获的文件路径 */
@@ -126,49 +126,12 @@ export async function captureChanges(
 			) {
 				// agent 中有新内容或修改，复制到 repo
 				if (existsSync(agentFilePath)) {
-					let content = await readFile(agentFilePath);
+					let content: Buffer = await readFile(agentFilePath);
 
-					// Sanitize settings.json: strip local-path packages that are machine-specific
-					// and should never be synced to other devices (e.g. local dev installs).
+					// Machine-local package paths stay on this device and are never
+					// persisted to the shared settings file.
 					if (relPath === "settings.json") {
-						try {
-							const parsed: unknown = JSON.parse(content.toString("utf-8"));
-							if (
-								parsed &&
-								typeof parsed === "object" &&
-								!Array.isArray(parsed)
-							) {
-								const settings = parsed as Record<string, unknown>;
-								if (Array.isArray(settings.packages)) {
-									const originalLen = settings.packages.length;
-									(settings as Record<string, unknown>).packages =
-										settings.packages.filter((pkg: unknown) => {
-											if (typeof pkg === "string")
-												return isPortablePackageSource(pkg);
-											if (
-												typeof pkg === "object" &&
-												pkg !== null &&
-												!Array.isArray(pkg) &&
-												"source" in pkg
-											) {
-												return isPortablePackageSource(
-													(pkg as { source: unknown }).source as string,
-												);
-											}
-											return false;
-										});
-									if ((settings.packages as unknown[]).length < originalLen) {
-										content = Buffer.from(
-											JSON.stringify(settings, null, 2) + "\n",
-											"utf-8",
-										);
-									}
-								}
-							}
-						} catch {
-							// If we can't parse the JSON, write the original content as-is and let
-							// validation catch the issue later.
-						}
+						content = sanitizeSettingsForRepository(content);
 					}
 
 					await mkdir(dirname(repoFilePath), { recursive: true });

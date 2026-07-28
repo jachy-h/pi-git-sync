@@ -29,6 +29,9 @@ export class FakeUi {
 	readonly confirmCalls: Array<{ title: string; message: string }> = [];
 	readonly inputCalls: Array<{ title: string; placeholder?: string }> = [];
 	readonly selectCalls: Array<{ title: string; options: unknown[] }> = [];
+	private readonly terminalInputHandlers: Array<
+		(data: string) => { consume?: boolean; data?: string } | undefined
+	> = [];
 	readonly theme = {
 		fg: (_role: string, text: string) => text,
 	};
@@ -42,6 +45,20 @@ export class FakeUi {
 
 	notify(message: string, level: NotificationLevel): void {
 		this.notifications.push({ message, level });
+	}
+
+	onTerminalInput(
+		handler: (data: string) => { consume?: boolean; data?: string } | undefined,
+	): () => void {
+		this.terminalInputHandlers.push(handler);
+		return () => {
+			const index = this.terminalInputHandlers.indexOf(handler);
+			if (index >= 0) this.terminalInputHandlers.splice(index, 1);
+		};
+	}
+
+	emitTerminalInput(data: string): void {
+		for (const handler of [...this.terminalInputHandlers]) handler(data);
 	}
 
 	async confirm(title: string, message: string): Promise<boolean> {
@@ -69,11 +86,11 @@ export class FakeUi {
 
 export class FakeCommandContext {
 	ui: FakeUi;
-	readonly mode: "interactive" | "rpc";
+	readonly mode: "tui" | "rpc";
 	reloadCalls = 0;
 	reloadError: Error | undefined;
 
-	constructor(mode: "interactive" | "rpc" = "interactive") {
+	constructor(mode: "tui" | "rpc" = "tui") {
 		this.ui = new FakeUi();
 		this.mode = mode;
 	}

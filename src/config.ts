@@ -52,7 +52,7 @@ export const DEFAULT_CONFIG: PiSyncConfig = {
 	],
 	exclude: ["**/.DS_Store", "**/*.tmp", "**/*.log"],
 	delete: "tracked",
-	pullTimeoutMs: 30000,
+	pullTimeoutMs: 10000,
 	security: {
 		scanSecretsBeforePush: true,
 	},
@@ -164,7 +164,7 @@ export function validateConfig(raw: Record<string, unknown>): PiSyncConfig {
 
 	// pull timeout
 	const pullTimeoutMs =
-		raw.pullTimeoutMs === undefined ? 30000 : raw.pullTimeoutMs;
+		raw.pullTimeoutMs === undefined ? 10000 : raw.pullTimeoutMs;
 	if (
 		typeof pullTimeoutMs !== "number" ||
 		!Number.isInteger(pullTimeoutMs) ||

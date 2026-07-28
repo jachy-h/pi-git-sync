@@ -16,7 +16,15 @@ export type SyncPhase = "preflight" | "pull" | "apply" | "push" | "complete";
 export interface RunOptions {
 	gitUrl?: string;
 	packageApproval?: PackageApproval;
+	/** Cancels nested subprocesses when the user aborts or a deadline fires. */
+	signal?: AbortSignal;
 	onProgress?: (phase: SyncPhase, message: string) => void;
+	/** Starts a UI-level fail-safe independent of the child-process timeout. */
+	onGitCommandStart?: (
+		phase: SyncPhase,
+		command: string,
+		timeoutMs: number,
+	) => void;
 }
 
 export interface RunResult extends CommandResult {

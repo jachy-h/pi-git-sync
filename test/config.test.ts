@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { validateConfig, DEFAULT_CONFIG } from "../src/config.ts";
+import { validateConfig } from "../src/config.ts";
 
 describe("validateConfig", () => {
 	it("should accept a valid v2 config", () => {
@@ -24,7 +24,7 @@ describe("validateConfig", () => {
 		]);
 		expect(config.exclude).toEqual(["**/.DS_Store"]);
 		expect(config.delete).toBe("tracked");
-		expect(config.pullTimeoutMs).toBe(30000);
+		expect(config.pullTimeoutMs).toBe(10000);
 		expect(config.security.scanSecretsBeforePush).toBe(true);
 	});
 
@@ -93,7 +93,7 @@ describe("validateConfig", () => {
 		expect(config.root).toBe("sync");
 		expect(config.exclude).toEqual([]);
 		expect(config.delete).toBe("tracked");
-		expect(config.pullTimeoutMs).toBe(30000);
+		expect(config.pullTimeoutMs).toBe(10000);
 	});
 
 	it("should accept a custom pull timeout", () => {

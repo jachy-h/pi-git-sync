@@ -86,8 +86,10 @@ After changing your configuration, run:
 ```
 
 The command pulls remote changes first, then captures and pushes local changes.
-It also recognizes older generated settings placeholders with an empty sync
-baseline and calibrates that state without file copying.
+While it runs, the status line shows elapsed time; press `Esc` to cancel and
+terminate active subprocesses. An active sync run is also stopped automatically
+at 60 seconds. It recognizes older generated settings placeholders with an empty
+sync baseline and calibrates that state without file copying.
 
 ---
 
@@ -148,7 +150,7 @@ Also: hidden files (except `.gitignore`) are excluded. Symlinks and symlink comp
     "**/*.log"
   ],
   "delete": "tracked",
-  "pullTimeoutMs": 30000,
+  "pullTimeoutMs": 10000,
   "security": {
     "scanSecretsBeforePush": true
   }
@@ -165,7 +167,7 @@ Also: hidden files (except `.gitignore`) are excluded. Symlinks and symlink comp
 | `include` | `string[]` | — | Glob whitelist (relative to `root`). Supports `*`, `**`, `?` |
 | `exclude` | `string[]` | `[]` | Glob patterns to exclude (lower priority than built-in hard deny) |
 | `delete` | `"tracked"` \| `"none"` | `"tracked"` | `"tracked"`: delete agent files when removed from repo. `"none"`: never delete |
-| `pullTimeoutMs` | `number` | `30000` | Timeout for pull/fetch Git operations in milliseconds; timeout details are returned as an error |
+| `pullTimeoutMs` | `number` | `10000` | Timeout for pull/fetch/rebase Git operations in milliseconds; a timeout kills the Git/SSH process tree, stops the sync, and returns control to Pi |
 | `security.scanSecretsBeforePush` | `boolean` | `true` | Scan staged files for secrets (API keys, tokens, private keys) before pushing |
 
 ---
@@ -305,7 +307,7 @@ pi-git-sync/
 ├── src/
 │   ├── commands.ts        # /pisync command routing + unified sync flow
 │   ├── config.ts          # pi-sync.json loading & validation
-│   ├── git.ts             # Git operations (status, fetch, pull, push, rebase)
+│   ├── git.ts             # Git operations (status, fetch, fast-forward, push, rebase)
 │   ├── inventory.ts       # Three-way file comparison (baseline vs local vs remote)
 │   ├── materialize.ts     # Apply repo files to agent (atomic writes, validation)
 │   ├── capture.ts         # Import agent changes into repo working tree

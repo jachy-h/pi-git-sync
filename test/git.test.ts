@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
-import { readFile, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { exec as execCb } from "node:child_process";
 import { promisify } from "node:util";
 import {
@@ -19,6 +19,7 @@ import {
 	gitExec,
 	GitCommandError,
 } from "../src/git.ts";
+import { withOperationSignal } from "../src/operation-context.ts";
 
 const execAsync = promisify(execCb);
 
@@ -235,5 +236,57 @@ describe("git", () => {
 				expect((error as Error).message).toContain("timed out after 50 ms");
 			}
 		});
+
+		it.skipIf(process.platform === "win32")(
+			"cancels Git and its descendants through AbortSignal",
+			async () => {
+				const controller = new AbortController();
+				const startedAt = Date.now();
+				const execution = gitExec(
+					repoDir,
+					["-c", "alias.wait=!sh -c 'sleep 2 & wait'", "wait"],
+					{ timeout: 5_000, signal: controller.signal },
+				);
+				setTimeout(() => controller.abort(), 50);
+
+				await expect(execution).rejects.toMatchObject({ timedOut: false });
+				expect(Date.now() - startedAt).toBeLessThan(1_000);
+			},
+		);
+
+		it.skipIf(process.platform === "win32")(
+			"inherits cancellation through the Git execution context",
+			async () => {
+				const controller = new AbortController();
+				const startedAt = Date.now();
+				const execution = withOperationSignal(controller.signal, () =>
+					gitExec(repoDir, [
+						"-c",
+						"alias.wait=!sh -c 'sleep 2 & wait'",
+						"wait",
+					]),
+				);
+				setTimeout(() => controller.abort(), 50);
+
+				await expect(execution).rejects.toMatchObject({ timedOut: false });
+				expect(Date.now() - startedAt).toBeLessThan(1_000);
+			},
+		);
+
+		it.skipIf(process.platform === "win32")(
+			"rejects promptly and kills Git descendants when a command times out",
+			async () => {
+				const startedAt = Date.now();
+				await expect(
+					gitExec(
+						repoDir,
+						["-c", "alias.wait=!sh -c 'sleep 2 & wait'", "wait"],
+						{ timeout: 50 },
+					),
+				).rejects.toMatchObject({ timedOut: true });
+
+				expect(Date.now() - startedAt).toBeLessThan(1_000);
+			},
+		);
 	});
 });

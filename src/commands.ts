@@ -17,7 +17,7 @@ import { readFile, mkdir } from "node:fs/promises";
 import {
 	gitStatus,
 	gitFetch,
-	gitPull,
+	gitFastForward,
 	gitPush,
 	gitPushHeadToBranch,
 	gitPushDeviceBranch,
@@ -38,6 +38,7 @@ import {
 	GitCommandError,
 } from "./git.ts";
 import { loadPiSyncConfig } from "./config.ts";
+import { withOperationSignal } from "./operation-context.ts";
 import type { PiSyncConfig } from "./config.ts";
 import { planMaterialize, executeMaterialize } from "./materialize.ts";
 import { createBackup, restoreBackup } from "./backup.ts";
@@ -104,8 +105,8 @@ export async function getRepoPath(configOverride?: string): Promise<string> {
 
 /**
  * Ensure all sync operations use the branch declared by pi-sync.json.
- * A clean worktree may be switched; dirty or in-progress Git operations are
- * rejected so we never move user work implicitly.
+ * Always let Git attempt the switch. Compatible local changes can move with
+ * the user; incompatible changes or an active operation are rejected by Git.
  */
 export async function ensureConfiguredBranch(
 	repoPath: string,
@@ -122,12 +123,6 @@ export async function ensureConfiguredBranch(
 
 	const status = await gitStatus(repoPath);
 	if (status.branch === branch) return false;
-	if (status.isRebasing || status.isMerging || status.hasUncommittedChanges) {
-		throw new Error(
-			`Configured sync branch is "${branch}", but repository is on "${status.branch}" ` +
-				"with local changes or an active Git operation. Switch branches manually after resolving it.",
-		);
-	}
 
 	const localRef = await gitProbe(repoPath, [
 		"show-ref",
@@ -330,7 +325,15 @@ export class PiSyncCommands {
 		initialReload = false,
 	): Promise<RunResult> {
 		this.emitProgress(options.onProgress, "pull", "Pulling remote changes...");
-		const pull = await this.pull(repoPath, options.packageApproval);
+		const pull = await this.pull(
+			repoPath,
+			options.packageApproval,
+			options.onProgress,
+			{
+				signal: options.signal,
+				onGitCommandStart: options.onGitCommandStart,
+			},
+		);
 		if (!pull.ok || pull.code === "approval_required") {
 			const pullDetails =
 				typeof pull.details === "object" && pull.details !== null
@@ -372,6 +375,14 @@ export class PiSyncCommands {
 
 	/** Run setup, recovery, or the complete pull-then-push synchronization. */
 	async run(options: RunOptions = {}): Promise<RunResult> {
+		return await withOperationSignal(options.signal, () =>
+			this.runWithOperationSignal(options),
+		);
+	}
+
+	private async runWithOperationSignal(
+		options: RunOptions,
+	): Promise<RunResult> {
 		this.emitProgress(
 			options.onProgress,
 			"preflight",
@@ -803,10 +814,25 @@ export class PiSyncCommands {
 	async pull(
 		repoPath?: string,
 		packageApproval?: PackageApproval,
+		onProgress?: RunOptions["onProgress"],
+		executionOptions: Pick<RunOptions, "signal" | "onGitCommandStart"> = {},
 	): Promise<CommandResult> {
 		const rp = repoPath ?? (await getRepoPath());
 		const config = await loadPiSyncConfig(rp);
 		const state = await loadState(this.agentDir);
+		const reportProgress = (message: string) =>
+			this.emitProgress(onProgress, "pull", message);
+		const reportGitStart = (command: string) =>
+			executionOptions.onGitCommandStart?.(
+				"pull",
+				command,
+				config.pullTimeoutMs,
+			);
+		const gitOptions = {
+			timeout: config.pullTimeoutMs,
+			signal: executionOptions.signal,
+		};
+		const pullTimeoutSeconds = config.pullTimeoutMs / 1000;
 
 		const acquired =
 			this.orchestrationLockHeld || (await this.lock.acquire("pull", 5000));
@@ -820,25 +846,27 @@ export class PiSyncCommands {
 		}
 
 		try {
-			// 1. 检查 repo 状态。若需要从另一个干净分支切换，先 fetch 目标
-			// branch，使 ensureConfiguredBranch 能建立 origin/<branch> tracking branch。
+			// 1. 检查 repo 状态。目标分支已在本地时立即尝试切换；仅在
+			// 本地分支不存在时先 fetch，以便建立 origin/<branch> tracking branch。
+			reportProgress("Inspecting repository state...");
 			let status = await gitStatus(rp);
 			let switchedBranch = false;
 			if (status.branch !== config.branch) {
-				if (
-					status.isRebasing ||
-					status.isMerging ||
-					status.hasUncommittedChanges
-				) {
-					return {
-						ok: false,
-						code: "blocked_conflict",
-						message: `Configured sync branch is "${config.branch}", but repository is on "${status.branch}" with local changes or an active Git operation. Switch branches manually after resolving it.`,
-						reload: false,
-					};
-				}
 				try {
-					await gitFetch(rp, { timeout: config.pullTimeoutMs });
+					const localBranch = await gitProbe(rp, [
+						"show-ref",
+						"--verify",
+						`refs/heads/${config.branch}`,
+					]);
+					if (!localBranch.ok) {
+						const command = "git fetch origin";
+						reportProgress(
+							`Running: ${command} (timeout: ${pullTimeoutSeconds}s)...`,
+						);
+						reportGitStart(command);
+						await gitFetch(rp, gitOptions);
+					}
+					reportProgress(`Switching to branch ${config.branch}...`);
 					switchedBranch = await ensureConfiguredBranch(rp, config.branch);
 					status = await gitStatus(rp);
 				} catch (error) {
@@ -864,19 +892,54 @@ export class PiSyncCommands {
 				};
 			}
 
+			let committedRepositoryChanges = false;
 			if (status.hasUncommittedChanges) {
-				return {
-					ok: false,
-					code: "blocked_conflict",
-					message:
-						"Repository has uncommitted changes. Commit or stash them first.",
-					reload: false,
-				};
+				try {
+					reportProgress(
+						"Running: git commit -m pi-sync: preserve repository changes before pull...",
+					);
+					await gitCommit(
+						rp,
+						"pi-sync: preserve repository changes before pull",
+					);
+					committedRepositoryChanges = true;
+					status = await gitStatus(rp);
+				} catch (error) {
+					return {
+						ok: false,
+						code: "git_failed",
+						message: `Could not commit repository changes before pull: ${error instanceof Error ? error.message : "Unknown error"}`,
+						reload: false,
+					};
+				}
 			}
 
 			// 2. Capture and commit agent-only changes before pulling so a pull does
 			// not fail merely because the current device has unsynced configuration.
+			reportProgress("Comparing local and remote changes...");
 			const inventory = await compareFiles(this.agentDir, rp, config, state);
+			// Equal local/remote content is safe to adopt as the baseline before
+			// fetching. The explicit hash check also migrates legacy settings state
+			// from raw-byte hashes to the portable canonical representation.
+			let convergedBaselineChanged = false;
+			for (const comparison of inventory.comparisons) {
+				if (
+					comparison.local &&
+					comparison.remote &&
+					comparison.local.sha256 === comparison.remote.sha256 &&
+					state.files[comparison.relativePath]?.sha256 !==
+						comparison.remote.sha256
+				) {
+					state.files[comparison.relativePath] = {
+						sha256: comparison.remote.sha256,
+						mode: comparison.remote.mode,
+					};
+					convergedBaselineChanged = true;
+				}
+			}
+			if (convergedBaselineChanged) {
+				await saveState(this.agentDir, state);
+			}
 			const hasRemoteChanges = inventory.comparisons.some((comparison) =>
 				[
 					"remote_only",
@@ -886,8 +949,9 @@ export class PiSyncCommands {
 					"converged",
 				].includes(comparison.changeType),
 			);
-			let capturedLocalChanges = false;
+			let capturedLocalChanges = committedRepositoryChanges;
 			if (hasLocalChanges(inventory.comparisons)) {
+				reportProgress("Capturing local changes before pull...");
 				const capture = await this.captureWithScaffoldCalibration(
 					rp,
 					config,
@@ -966,6 +1030,9 @@ export class PiSyncCommands {
 					};
 				}
 				try {
+					reportProgress(
+						"Running: git commit -m pi-sync: capture local changes before pull...",
+					);
 					await gitCommit(rp, "pi-sync: capture local changes before pull");
 					capturedLocalChanges = true;
 				} catch (error) {
@@ -980,7 +1047,12 @@ export class PiSyncCommands {
 
 			// 3. Fetch
 			try {
-				await gitFetch(rp, { timeout: config.pullTimeoutMs });
+				const command = "git fetch origin";
+				reportProgress(
+					`Running: ${command} (timeout: ${pullTimeoutSeconds}s)...`,
+				);
+				reportGitStart(command);
+				await gitFetch(rp, gitOptions);
 			} catch (err) {
 				return {
 					ok: false,
@@ -990,11 +1062,16 @@ export class PiSyncCommands {
 				};
 			}
 
-			// 4. A local capture creates a commit, so rebase it onto the fetched
-			// remote branch instead of attempting a fast-forward-only pull.
+			// 4. A local repository or agent capture creates a commit, so rebase it
+			// onto the fetched remote branch instead of fast-forwarding only.
 			if (capturedLocalChanges) {
 				try {
-					const rebase = await gitRebase(rp, config.branch);
+					const command = `git rebase origin/${config.branch}`;
+					reportProgress(
+						`Running: ${command} (timeout: ${pullTimeoutSeconds}s)...`,
+					);
+					reportGitStart(command);
+					const rebase = await gitRebase(rp, config.branch, gitOptions);
 					if (rebase.conflict) {
 						const branch = await this.preserveRebaseConflictOnDeviceBranch(
 							rp,
@@ -1015,6 +1092,7 @@ export class PiSyncCommands {
 						reload: false,
 					};
 				}
+				reportProgress("Applying pulled changes...");
 				return await this.applyCurrent(
 					rp,
 					config,
@@ -1024,17 +1102,21 @@ export class PiSyncCommands {
 				);
 			}
 
-			// 5. Pull (fast-forward only)
+			// 5. Fast-forward from the remote-tracking ref updated by step 3.
+			// Do not use git pull here: it would perform a second network fetch.
 			let pulled: boolean;
 			try {
-				({ pulled } = await gitPull(rp, config.branch, {
-					timeout: config.pullTimeoutMs,
-				}));
+				const command = `git merge --ff-only origin/${config.branch}`;
+				reportProgress(
+					`Running: ${command} (timeout: ${pullTimeoutSeconds}s)...`,
+				);
+				reportGitStart(command);
+				({ pulled } = await gitFastForward(rp, config.branch, gitOptions));
 			} catch (error) {
 				return {
 					ok: false,
 					code: "git_failed",
-					message: `git pull failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+					message: `git fast-forward failed: ${error instanceof Error ? error.message : "Unknown error"}`,
 					reload: false,
 				};
 			}
@@ -1060,6 +1142,7 @@ export class PiSyncCommands {
 			}
 
 			// 6. Apply
+			reportProgress("Applying pulled changes...");
 			return await this.applyCurrent(
 				rp,
 				config,
@@ -1557,10 +1640,26 @@ export class PiSyncCommands {
 			try {
 				const status = await gitStatus(preparation.repoPath);
 				const hasAheadCommit = status.ahead > 0;
-				await this.pushMainAndDeviceBranches(
-					preparation.repoPath,
-					preparation.branch,
-				);
+				if (hasAheadCommit) {
+					await this.pushMainAndDeviceBranches(
+						preparation.repoPath,
+						preparation.branch,
+					);
+				} else {
+					const deviceBranch = await this.getDeviceBranchName();
+					const remoteDeviceRef = await gitProbe(preparation.repoPath, [
+						"show-ref",
+						"--hash",
+						"--verify",
+						`refs/remotes/origin/${deviceBranch}`,
+					]);
+					if (
+						!remoteDeviceRef.ok ||
+						remoteDeviceRef.stdout.trim() !== status.commit
+					) {
+						await gitPushHeadToBranch(preparation.repoPath, deviceBranch);
+					}
+				}
 				return {
 					ok: true,
 					code: hasAheadCommit ? "ok" : "noop",
@@ -1799,8 +1898,8 @@ export class PiSyncCommands {
 
 			const status = await gitStatus(defaultPath);
 			if (status.behind > 0) {
-				onProgress?.("Pulling remote changes...");
-				await gitPull(defaultPath, config.branch, {
+				onProgress?.("Fast-forwarding fetched changes...");
+				await gitFastForward(defaultPath, config.branch, {
 					timeout: config.pullTimeoutMs,
 				});
 			}
@@ -2060,14 +2159,19 @@ export class PiSyncCommands {
 					level: "error",
 				};
 			} else {
-				// Valid sync repo: load the declared branch before any pull.
+				// Valid sync repo: fetch once, then update from the local tracking ref.
 				onProgress?.("Fetching latest...");
 				lines.push("Valid sync repo detected — fetching latest...");
 				const existingConfig = await loadPiSyncConfig(defaultPath);
-				await ensureConfiguredBranch(defaultPath, existingConfig.branch);
-				const { pulled } = await gitPull(defaultPath, existingConfig.branch, {
+				await gitFetch(defaultPath, {
 					timeout: existingConfig.pullTimeoutMs,
 				});
+				await ensureConfiguredBranch(defaultPath, existingConfig.branch);
+				const { pulled } = await gitFastForward(
+					defaultPath,
+					existingConfig.branch,
+					{ timeout: existingConfig.pullTimeoutMs },
+				);
 				lines.push(pulled ? "Updated to latest." : "Already up to date.");
 			}
 
@@ -2350,6 +2454,7 @@ export class PiSyncCommands {
 		state: SyncState,
 		reason: string,
 		packageApproval?: PackageApproval,
+		automaticConflictResolutionAttempted = false,
 	): Promise<CommandResult> {
 		const commit = await getHeadCommit(rp);
 		const lines: string[] = [];
@@ -2359,6 +2464,15 @@ export class PiSyncCommands {
 
 		if (plan.blocked) {
 			const errorLines: string[] = [];
+			if (plan.conflicts.length > 0 && automaticConflictResolutionAttempted) {
+				return {
+					ok: false,
+					code: "blocked_conflict",
+					message: `Conflict remained after automatic resolution: ${plan.conflicts.map((conflict) => conflict.relativePath).join(", ")}`,
+					reload: false,
+					details: { conflicts: plan.conflicts },
+				};
+			}
 			if (plan.conflicts.length > 0) {
 				try {
 					const preservation = await this.preserveConflictOnDeviceBranch(
@@ -2373,6 +2487,7 @@ export class PiSyncCommands {
 							state,
 							reason,
 							packageApproval,
+							true,
 						);
 						return {
 							...resolved,
@@ -2392,6 +2507,7 @@ export class PiSyncCommands {
 							state,
 							reason,
 							packageApproval,
+							true,
 						);
 						return {
 							...resolved,
@@ -2820,7 +2936,7 @@ async function scaffoldConfigRepoV2(repoPath: string): Promise<void> {
 		],
 		exclude: ["**/.DS_Store", "**/*.tmp", "**/*.log", "extensions/**/logs/**"],
 		delete: "tracked",
-		pullTimeoutMs: 30000,
+		pullTimeoutMs: 10000,
 		security: {
 			scanSecretsBeforePush: true,
 		},

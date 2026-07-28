@@ -188,6 +188,19 @@ describe.sequential("PiSyncCommands.push", () => {
 				reload: false,
 				message: expect.stringContaining("No changes to push"),
 			});
+
+			// Once both remote refs already point at HEAD, a repeated no-op sync
+			// must not pay for two additional SSH handshakes.
+			await runGit(fixture.deviceBPath, [
+				"remote",
+				"set-url",
+				"origin",
+				join(environment.rootDir, "unreachable.git"),
+			]);
+			const repeated = await new PiSyncCommands(environment.agentDir).push(
+				fixture.deviceBPath,
+			);
+			expect(repeated).toMatchObject({ ok: true, code: "noop" });
 		});
 	});
 

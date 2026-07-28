@@ -448,7 +448,7 @@ sequenceDiagram
         alt 分叉
             R-->>A: ⚠ 停止！提示手动处理
         else 可 fast-forward
-            R->>R: ⑥ git pull --ff-only
+            R->>R: ⑥ git merge --ff-only origin/&lt;branch&gt;
             R->>A: ⑦ planMaterialize + executeMaterialize
             A->>A: ⑧ 更新 state baseline
             A->>A: ⑨ reconcile packages
@@ -532,7 +532,7 @@ flowchart TD
     A["/pisync（首次 setup）"] --> B{仓库已存在?}
     B -->|是| C{--force?}
     C -->|是| D["rm -rf repo<br/>重新 clone"]
-    C -->|否| E["fetch + pull<br/>apply 当前配置<br/>返回 'Already initialized'"]
+    C -->|否| E["fetch + local fast-forward<br/>apply 当前配置<br/>返回 'Already initialized'"]
     D --> F[clone]
     B -->|否| F
     
@@ -541,7 +541,7 @@ flowchart TD
     G -->|成功| I{仓库状态?}
     
     I -->|空仓库| J[scaffold config schema v2]
-    I -->|已有合法配置| K[fetch + pull + apply]
+    I -->|已有合法配置| K[fetch + local fast-forward + apply]
     I -->|有提交但无 pi-sync.json| L["返回 'invalid' 错误<br/>提示使用 --force"]
     
     J --> M["创建目录:<br/>sync/ + extensions/ skills/ prompts/ themes/"]

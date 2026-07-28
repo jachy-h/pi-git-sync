@@ -75,8 +75,10 @@ pi-git-sync 会获取仓库，并将其中的配置应用到这台 Pi 安装。
 /pisync
 ```
 
-该命令会先拉取远端变更，再捕获并推送本地变更。若旧版本留下默认 settings
-模板且同步基线为空，`/pisync` 会识别并校准该状态，无需复制文件。
+该命令会先拉取远端变更，再捕获并推送本地变更。执行期间状态栏会持续显示
+已用时间；按下 `Esc` 可立即取消并终止当前子进程。单次有效同步执行达到 60
+秒时也会自动停止。若旧版本留下默认 settings 模板且同步基线为空，`/pisync`
+会识别并校准该状态，无需复制文件。
 
 ---
 
@@ -137,7 +139,7 @@ pi-git-sync 会获取仓库，并将其中的配置应用到这台 Pi 安装。
     "**/*.log"
   ],
   "delete": "tracked",
-  "pullTimeoutMs": 30000,
+  "pullTimeoutMs": 10000,
   "security": {
     "scanSecretsBeforePush": true
   }
@@ -154,7 +156,7 @@ pi-git-sync 会获取仓库，并将其中的配置应用到这台 Pi 安装。
 | `include` | `string[]` | — | Glob 白名单（相对于 `root`）。支持 `*`、`**`、`?` |
 | `exclude` | `string[]` | `[]` | Glob 排除列表（优先级低于内置 hard deny） |
 | `delete` | `"tracked"` \| `"none"` | `"tracked"` | `"tracked"`：仓库删除时同步删除 agent 文件。`"none"`：永不删除 |
-| `pullTimeoutMs` | `number` | `30000` | pull/fetch Git 操作超时时间（毫秒）；超时会返回异常信息 |
+| `pullTimeoutMs` | `number` | `10000` | pull/fetch/rebase Git 操作超时时间（毫秒）；超时会终止整个 Git/SSH 进程树、停止本次同步并恢复 Pi 输入 |
 | `security.scanSecretsBeforePush` | `boolean` | `true` | 推送前扫描敏感信息（API Key、Token、私钥等） |
 
 ---
@@ -290,7 +292,7 @@ pi-git-sync/
 ├── src/
 │   ├── commands.ts        # /pisync 命令路由 + 统一同步流程
 │   ├── config.ts          # pi-sync.json 加载与校验
-│   ├── git.ts             # Git 操作（status、fetch、pull、push、rebase）
+│   ├── git.ts             # Git 操作（status、fetch、fast-forward、push、rebase）
 │   ├── inventory.ts       # 三方文件比较（基线 vs 本地 vs 远端）
 │   ├── materialize.ts     # 将仓库文件应用到 agent（原子写入、校验）
 │   ├── capture.ts         # 将 agent 变更导入仓库工作树

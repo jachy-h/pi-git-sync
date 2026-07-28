@@ -11,10 +11,10 @@
  * - gitExec 非零退出时 throw GitCommandError
  * - gitProbe 用于预期可能失败的探测（如 ls-remote、remote get-url）
  */
-import { promisify } from "node:util";
-import { execFile as execFileCb } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { getOperationSignal } from "./operation-context.ts";
 
-const execFileAsync = promisify(execFileCb);
+const MAX_GIT_OUTPUT_BYTES = 20 * 1024 * 1024;
 
 // ========== 类型 ==========
 
@@ -138,37 +138,195 @@ export function isGitFailure(stdout: string, stderr: string): boolean {
 
 // ========== gitExec（严格：非零退出时 throw） ==========
 
+export interface GitCommandOptions {
+	timeout?: number;
+	signal?: AbortSignal;
+}
+
+interface GitProcessFailure {
+	code?: number | string | null;
+	killed?: boolean;
+	message?: string;
+	stdout: string;
+	stderr: string;
+}
+
+/**
+ * Kill Git and every child it started, then detach all parent-side handles.
+ * Destroying the pipes is essential: a descendant that escaped the process
+ * group can otherwise keep them open and keep Pi's command lifecycle busy.
+ */
+function terminateGitProcessTree(child: ChildProcess): void {
+	const pid = child.pid;
+
+	// Stop accepting output before sending signals. This makes timeout completion
+	// independent of whether Git/ssh closes inherited stdout and stderr correctly.
+	child.stdout?.removeAllListeners("data");
+	child.stderr?.removeAllListeners("data");
+	child.stdout?.destroy();
+	child.stderr?.destroy();
+
+	if (pid !== undefined) {
+		if (process.platform === "win32") {
+			try {
+				spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
+					stdio: "ignore",
+					windowsHide: true,
+				}).unref();
+			} catch {
+				// Also kill the direct child below.
+			}
+		} else {
+			try {
+				// detached: true below gives Git its own process group, including ssh.
+				process.kill(-pid, "SIGKILL");
+			} catch {
+				// The process may have exited between the timeout and this call.
+			}
+		}
+	}
+
+	// This is a required fallback on Windows and harmless if the group kill above
+	// already succeeded. unref() ensures a broken descendant cannot retain Pi.
+	child.kill("SIGKILL");
+	child.unref();
+}
+
+/**
+ * Run a Git process with a hard timeout.
+ *
+ * execFile's timeout kills only its direct child and then waits for the child's
+ * inherited stdout/stderr handles to close. Git commands can leave ssh or shell
+ * descendants alive, which makes a timed-out /pisync command appear permanently
+ * stuck. A dedicated process group lets us kill the entire tree and reject as
+ * soon as the timeout expires.
+ */
+function runGitProcess(
+	repoPath: string,
+	args: string[],
+	timeoutMs: number,
+	signal?: AbortSignal,
+): Promise<GitCommandOutput> {
+	return new Promise((resolve, reject) => {
+		let child: ChildProcess;
+		try {
+			child = spawn("git", args, {
+				cwd: repoPath,
+				env: buildGitEnv(),
+				detached: process.platform !== "win32",
+				stdio: ["ignore", "pipe", "pipe"],
+				windowsHide: true,
+			});
+		} catch (error) {
+			reject(error);
+			return;
+		}
+
+		let stdout = "";
+		let stderr = "";
+		let outputBytes = 0;
+		let settled = false;
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		let abort: (() => void) | undefined;
+
+		const finish = (failure?: GitProcessFailure) => {
+			if (settled) return;
+			settled = true;
+			if (timeout !== undefined) clearTimeout(timeout);
+			if (abort !== undefined) signal?.removeEventListener("abort", abort);
+
+			if (!failure) {
+				resolve({ stdout: stdout.trimEnd(), stderr: stderr.trimEnd() });
+				return;
+			}
+			reject(failure);
+		};
+
+		const appendOutput = (stream: "stdout" | "stderr", chunk: Buffer) => {
+			if (settled) return;
+			outputBytes += chunk.length;
+			if (stream === "stdout") stdout += chunk.toString();
+			else stderr += chunk.toString();
+
+			if (outputBytes > MAX_GIT_OUTPUT_BYTES) {
+				terminateGitProcessTree(child);
+				finish({
+					code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+					message: `git output exceeded ${MAX_GIT_OUTPUT_BYTES} bytes`,
+					stdout,
+					stderr,
+				});
+			}
+		};
+
+		child.stdout?.on("data", (chunk: Buffer) => appendOutput("stdout", chunk));
+		child.stderr?.on("data", (chunk: Buffer) => appendOutput("stderr", chunk));
+		child.once("error", (error) =>
+			finish({
+				code: (error as NodeJS.ErrnoException).code,
+				message: error.message,
+				stdout,
+				stderr,
+			}),
+		);
+		child.once("close", (code, signal) => {
+			if (code === 0) {
+				finish();
+				return;
+			}
+			finish({
+				code,
+				message: signal ? `git terminated by ${signal}` : undefined,
+				stdout,
+				stderr,
+			});
+		});
+
+		abort = () => {
+			terminateGitProcessTree(child);
+			finish({
+				code: "ABORT_ERR",
+				killed: true,
+				message: "git operation was cancelled",
+				stdout,
+				stderr,
+			});
+		};
+		if (signal?.aborted) {
+			abort();
+			return;
+		}
+		signal?.addEventListener("abort", abort, { once: true });
+
+		timeout = setTimeout(() => {
+			terminateGitProcessTree(child);
+			finish({
+				code: "ETIMEDOUT",
+				killed: true,
+				message: `git timed out after ${timeoutMs} ms`,
+				stdout,
+				stderr,
+			});
+		}, timeoutMs);
+	});
+}
+
 export async function gitExec(
 	repoPath: string,
 	args: string[],
-	options?: { timeout?: number },
+	options?: GitCommandOptions,
 ): Promise<GitCommandOutput> {
+	const timeoutMs = options?.timeout ?? 30000;
+	const signal = options?.signal ?? getOperationSignal();
 	try {
-		const result = await execFileAsync("git", args, {
-			cwd: repoPath,
-			timeout: options?.timeout ?? 30000,
-			env: buildGitEnv(),
-			maxBuffer: 20 * 1024 * 1024,
-		});
-		return { stdout: result.stdout.trimEnd(), stderr: result.stderr.trimEnd() };
+		return await runGitProcess(repoPath, args, timeoutMs, signal);
 	} catch (err: unknown) {
-		const error = err as {
-			stdout?: string;
-			stderr?: string;
-			message?: string;
-			code?: string;
-			killed?: boolean;
-		};
-		const timeoutMs = options?.timeout ?? 30000;
-		const timedOut = error.killed === true || error.code === "ETIMEDOUT";
+		const error = err as Partial<GitProcessFailure>;
+		const timedOut = error.code === "ETIMEDOUT";
 		throw new GitCommandError(
 			args,
 			repoPath,
-			typeof error.code === "number"
-				? error.code
-				: error.code !== undefined
-					? null
-					: null,
+			typeof error.code === "number" ? error.code : null,
 			error.stdout?.trimEnd() ?? "",
 			error.stderr?.trimEnd() ?? error.message ?? "Unknown git error",
 			timedOut,
@@ -186,7 +344,7 @@ export async function gitExec(
 export async function gitProbe(
 	repoPath: string,
 	args: string[],
-	options?: { timeout?: number },
+	options?: GitCommandOptions,
 ): Promise<GitProbeOutput> {
 	try {
 		const result = await gitExec(repoPath, args, options);
@@ -356,19 +514,24 @@ export async function gitDiffFiles(
 
 export async function gitFetch(
 	repoPath: string,
-	options?: { timeout?: number },
+	options?: GitCommandOptions,
 ): Promise<void> {
 	await gitExec(repoPath, ["fetch", "origin"], options);
 }
 
-export async function gitPull(
+/**
+ * Fast-forward the current branch from an already-fetched remote-tracking ref.
+ * This intentionally uses merge rather than pull: pull would contact origin a
+ * second time after gitFetch() and can repeat a slow SSH/authentication handshake.
+ */
+export async function gitFastForward(
 	repoPath: string,
 	branch: string,
-	options?: { timeout?: number },
+	options?: GitCommandOptions,
 ): Promise<{ pulled: boolean }> {
 	const result = await gitExec(
 		repoPath,
-		["pull", "--ff-only", "origin", branch],
+		["merge", "--ff-only", `origin/${branch}`],
 		options,
 	);
 	const pulled =
@@ -428,9 +591,14 @@ export async function gitRenameBranch(
 export async function gitRebase(
 	repoPath: string,
 	branch: string,
+	options?: GitCommandOptions,
 ): Promise<{ rebased: boolean; conflict: boolean }> {
 	try {
-		const result = await gitExec(repoPath, ["rebase", `origin/${branch}`]);
+		const result = await gitExec(
+			repoPath,
+			["rebase", `origin/${branch}`],
+			options,
+		);
 		const combined = `${result.stderr}\n${result.stdout}`;
 
 		if (/CONFLICT/i.test(combined)) {
@@ -522,15 +690,13 @@ export async function canFastForward(
 	local: string,
 	remote: string,
 ): Promise<boolean> {
-	try {
-		await execFileAsync("git", ["merge-base", "--is-ancestor", local, remote], {
-			cwd: repoPath,
-			env: buildGitEnv(),
-		});
-		return true;
-	} catch {
-		return false;
-	}
+	const result = await gitProbe(repoPath, [
+		"merge-base",
+		"--is-ancestor",
+		local,
+		remote,
+	]);
+	return result.ok;
 }
 
 export async function isDiverged(
