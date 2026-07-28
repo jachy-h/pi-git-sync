@@ -818,7 +818,10 @@ describe.sequential("Extension pull command interaction flow", () => {
 					timeoutSpy.mockRestore();
 				}
 
-				expect(Date.now() - startedAt).toBeLessThan(1_500);
+				// This uses real Git processes and can run alongside the other test files.
+				// Keep the bound well below the simulated 30-second child timeout while
+				// allowing normal CI scheduler and process-startup variance.
+				expect(Date.now() - startedAt).toBeLessThan(5_000);
 				expect(notificationTextOf(ctx)).toContain(
 					"timed out after 75 ms. Sync stopped.",
 				);
