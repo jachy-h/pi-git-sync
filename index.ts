@@ -20,7 +20,7 @@ import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
-import type { SelectItem } from "@earendil-works/pi-tui";
+import { matchesKey, type SelectItem } from "@earendil-works/pi-tui";
 import { PiSyncCommands } from "./src/commands.ts";
 import type { RunOptions, RunResult } from "./src/operation-result.ts";
 
@@ -261,13 +261,18 @@ async function handlePiSync(
 		let elapsedTimer: ReturnType<typeof setInterval> | undefined;
 		let removeTerminalInputListener: (() => void) | undefined;
 		let watchdogResolve: ((result: RunResult) => void) | undefined;
+		let cancellationResolve: ((result: RunResult) => void) | undefined;
 		let lastPublishedProgress: string | undefined;
 		let watchdogFired = false;
+		let cancelled = false;
 		let currentPhase: RunResult["phase"] = "preflight";
 		let commandExecution: Promise<RunResult> | undefined;
 		let execution: Promise<RunResult> | undefined;
 		const watchdog = new Promise<RunResult>((resolve) => {
 			watchdogResolve = resolve;
+		});
+		const cancellation = new Promise<RunResult>((resolve) => {
+			cancellationResolve = resolve;
 		});
 		const elapsed = () => formatElapsed(Date.now() - startedAt);
 		const renderProgress = () =>
@@ -292,6 +297,19 @@ async function handlePiSync(
 			if (watchdogFired) return;
 			watchdogFired = true;
 			watchdogResolve?.(result);
+			controller.abort();
+		};
+		const cancel = () => {
+			if (controller.signal.aborted) return;
+			cancelled = true;
+			cancellationResolve?.({
+				ok: false,
+				code: "partial_failure",
+				message: "pi-sync cancelled.",
+				reload: false,
+				mode: "sync",
+				phase: currentPhase,
+			});
 			controller.abort();
 		};
 		const startExecution = () => {
@@ -334,12 +352,12 @@ async function handlePiSync(
 					}, timeoutMs + COMMAND_SETTLE_GRACE_MS);
 				},
 			});
-			execution = Promise.race([commandExecution, watchdog]);
+			execution = Promise.race([commandExecution, watchdog, cancellation]);
 			return execution;
 		};
 		const awaitExecution = async () => {
 			const result = await startExecution();
-			if (watchdogFired && commandExecution) {
+			if ((watchdogFired || cancelled) && commandExecution) {
 				// Give the aborted command a short chance to release its sync lock,
 				// without ever retaining the TUI indefinitely.
 				await Promise.race([
@@ -359,8 +377,8 @@ async function handlePiSync(
 		elapsedTimer = setInterval(publishProgress, ELAPSED_REFRESH_MS);
 		if (ctx.mode === "tui") {
 			removeTerminalInputListener = ctx.ui.onTerminalInput((data) => {
-				if (data !== "\u001b" || controller.signal.aborted) return;
-				controller.abort();
+				if (!matchesKey(data, "escape") || controller.signal.aborted) return;
+				cancel();
 				return { consume: true };
 			});
 		}
@@ -425,7 +443,13 @@ async function handlePiSync(
 	}
 
 	notifyOperationResult(result, ctx);
-	if (result.reload) await ctx.reload();
+	if (result.reload) {
+		const shouldReload = await ctx.ui.confirm(
+			"Reload Pi?",
+			"Synchronization updated your configuration. Reload Pi now to apply the changes?",
+		);
+		if (shouldReload) await ctx.reload();
+	}
 }
 
 async function requestPackageApproval(

@@ -347,7 +347,7 @@ describe("debug:clear-repo command", () => {
 });
 
 describe.sequential("Extension push command interaction flow", () => {
-	it("push flow does not request confirmation", async () => {
+	it("push flow asks before reloading after sync completes", async () => {
 		await withTestEnvironment(async (environment) => {
 			const fixture = await createGitFixture(environment.rootDir);
 			await seedConfigRepo(fixture.deviceBPath);
@@ -366,7 +366,9 @@ describe.sequential("Extension push command interaction flow", () => {
 			const cmd = api.commands.get("pisync")!;
 			await cmd.handler(undefined, ctx);
 
-			expect(ctx.ui.confirmCalls).toHaveLength(0);
+			expect(ctx.ui.confirmCalls).toHaveLength(1);
+			expect(ctx.ui.confirmCalls[0]?.title).toBe("Reload Pi?");
+			expect(ctx.reloadCalls).toBe(0);
 			expect(ctx.ui.notifications.length).toBeGreaterThan(0);
 		});
 	});
@@ -402,7 +404,13 @@ describe.sequential("Extension push command interaction flow", () => {
 			const cmd = api.commands.get("pisync")!;
 			await cmd.handler(undefined, ctx);
 
-			expect(ctx.ui.confirmCalls).toHaveLength(0);
+			expect(ctx.ui.confirmCalls).toEqual([
+				{
+					title: "Reload Pi?",
+					message:
+						"Synchronization updated your configuration. Reload Pi now to apply the changes?",
+				},
+			]);
 			expect(notificationTextOf(ctx)).toContain(
 				"Push: No worktree changes; synchronized ahead commits",
 			);
@@ -411,11 +419,11 @@ describe.sequential("Extension push command interaction flow", () => {
 				message: expect.stringContaining("◆ pi-git-sync: Sync completed."),
 				level: "info",
 			});
-			expect(ctx.reloadCalls).toBe(1);
+			expect(ctx.reloadCalls).toBe(0);
 		});
 	});
 
-	it("calls reload when push succeeds and result.reload is true", async () => {
+	it("reloads after the user confirms a successful sync that requires it", async () => {
 		await withTestEnvironment(async (environment) => {
 			const fixture = await createGitFixture(environment.rootDir);
 			await seedConfigRepo(fixture.deviceAPath);
@@ -447,11 +455,18 @@ describe.sequential("Extension push command interaction flow", () => {
 			const cmd = api.commands.get("pisync")!;
 			await cmd.handler(undefined, ctx);
 
+			expect(ctx.ui.confirmCalls).toEqual([
+				{
+					title: "Reload Pi?",
+					message:
+						"Synchronization updated your configuration. Reload Pi now to apply the changes?",
+				},
+			]);
 			expect(ctx.reloadCalls).toBe(1);
 		});
 	});
 
-	it("does NOT call reload when result.reload is false", async () => {
+	it("does not request a reload when result.reload is false", async () => {
 		await withTestEnvironment(async (environment) => {
 			const fixture = await createGitFixture(environment.rootDir);
 			await seedConfigRepo(fixture.deviceBPath);
@@ -479,6 +494,7 @@ describe.sequential("Extension push command interaction flow", () => {
 			await cmd.handler(undefined, ctx);
 
 			// No changes = reload false
+			expect(ctx.ui.confirmCalls).toHaveLength(0);
 			expect(ctx.reloadCalls).toBe(0);
 		});
 	});
@@ -613,7 +629,7 @@ describe.sequential("pisync running UI", () => {
 		}
 	});
 
-	it("aborts the running command when Escape is pressed", async () => {
+	it("aborts the running command when terminal Escape is pressed", async () => {
 		let observedSignal: AbortSignal | undefined;
 		let started!: () => void;
 		const runStarted = new Promise<void>((resolve) => {
@@ -647,7 +663,42 @@ describe.sequential("pisync running UI", () => {
 			const ctx = new FakeCommandContext("tui");
 			const pending = api.commands.get("pisync")!.handler(undefined, ctx);
 			await runStarted;
+			// Kitty keyboard protocol represents Escape as CSI 27;1u rather than ESC.
+			ctx.ui.emitTerminalInput("\u001b[27;1u");
+			await pending;
+
+			expect(observedSignal?.aborted).toBe(true);
+			expect(notificationTextOf(ctx)).toContain(
+				"pi-sync: Cancelled after 00:00.",
+			);
+			expect(ctx.ui.statusUpdates).toEqual([]);
+		} finally {
+			runSpy.mockRestore();
+		}
+	});
+
+	it("returns control after Escape even when the command ignores abort", async () => {
+		let observedSignal: AbortSignal | undefined;
+		let started!: () => void;
+		const runStarted = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const runSpy = vi
+			.spyOn(PiSyncCommands.prototype, "run")
+			.mockImplementation(async (options) => {
+				observedSignal = options?.signal;
+				started();
+				return await new Promise<RunResult>(() => {});
+			});
+		try {
+			const api = new FakeExtensionApi();
+			register(api);
+			const ctx = new FakeCommandContext("tui");
+			const pending = api.commands.get("pisync")!.handler(undefined, ctx);
+			await runStarted;
+
 			ctx.ui.emitTerminalInput("\u001b");
+			await new Promise((resolve) => setTimeout(resolve, 110));
 			await pending;
 
 			expect(observedSignal?.aborted).toBe(true);
@@ -816,13 +867,14 @@ describe.sequential("Extension pull command interaction flow", () => {
 			const api = new FakeExtensionApi();
 			register(api);
 			const ctx = createRpcContext();
-			ctx.ui.confirmResponses = [true];
+			ctx.ui.confirmResponses = [true, true];
 
 			await api.commands.get("pisync")!.handler(undefined, ctx);
 
 			expect(ctx.ui.confirmCalls[0]?.title).toContain(
 				"Approve package installation",
 			);
+			expect(ctx.ui.confirmCalls[1]?.title).toBe("Reload Pi?");
 			expect(ctx.ui.notifications.at(-1)?.message).toContain("Files written");
 			expect(ctx.reloadCalls).toBe(1);
 		});
