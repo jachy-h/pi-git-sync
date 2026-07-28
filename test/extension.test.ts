@@ -629,7 +629,8 @@ describe.sequential("pisync running UI", () => {
 		}
 	});
 
-	it("aborts the running command when terminal Escape is pressed", async () => {
+	it("shows stopping before confirming terminal Escape cancellation", async () => {
+		vi.useFakeTimers();
 		let observedSignal: AbortSignal | undefined;
 		let started!: () => void;
 		const runStarted = new Promise<void>((resolve) => {
@@ -665,20 +666,37 @@ describe.sequential("pisync running UI", () => {
 			await runStarted;
 			// Kitty keyboard protocol represents Escape as CSI 27;1u rather than ESC.
 			ctx.ui.emitTerminalInput("\u001b[27;1u");
-			await pending;
 
 			expect(observedSignal?.aborted).toBe(true);
-			expect(notificationTextOf(ctx)).toContain(
-				"pi-sync: Cancelled after 00:00.",
+			expect(notificationTextOf(ctx)).toContain("pi-sync: Stopping...");
+			await vi.advanceTimersByTimeAsync(999);
+			expect(notificationTextOf(ctx)).not.toContain(
+				"pi-sync: Cancelled by user.",
 			);
+			await vi.advanceTimersByTimeAsync(1);
+			await pending;
+
+			expect(notificationTextOf(ctx)).toContain("pi-sync: Cancelled by user.");
 			expect(ctx.ui.statusUpdates).toEqual([]);
 		} finally {
 			runSpy.mockRestore();
+			vi.useRealTimers();
 		}
 	});
 
-	it("returns control after Escape even when the command ignores abort", async () => {
+	it("confirms cancellation after one second when the command ignores abort", async () => {
+		vi.useFakeTimers();
 		let observedSignal: AbortSignal | undefined;
+		let reportProgress:
+			| ((phase: RunResult["phase"], message: string) => void)
+			| undefined;
+		let reportGitCommandStart:
+			| ((
+					phase: RunResult["phase"],
+					command: string,
+					timeoutMs: number,
+			  ) => void)
+			| undefined;
 		let started!: () => void;
 		const runStarted = new Promise<void>((resolve) => {
 			started = resolve;
@@ -687,6 +705,8 @@ describe.sequential("pisync running UI", () => {
 			.spyOn(PiSyncCommands.prototype, "run")
 			.mockImplementation(async (options) => {
 				observedSignal = options?.signal;
+				reportProgress = options?.onProgress;
+				reportGitCommandStart = options?.onGitCommandStart;
 				started();
 				return await new Promise<RunResult>(() => {});
 			});
@@ -698,16 +718,33 @@ describe.sequential("pisync running UI", () => {
 			await runStarted;
 
 			ctx.ui.emitTerminalInput("\u001b");
-			await new Promise((resolve) => setTimeout(resolve, 110));
-			await pending;
+			reportProgress?.("pull", "Comparing local and remote changes...");
+			reportGitCommandStart?.(
+				"pull",
+				"git commit -m pi-sync: capture local changes before pull",
+				10_000,
+			);
 
 			expect(observedSignal?.aborted).toBe(true);
-			expect(notificationTextOf(ctx)).toContain(
-				"pi-sync: Cancelled after 00:00.",
+			expect(notificationTextOf(ctx)).not.toContain(
+				"Comparing local and remote changes...",
 			);
+			expect(notificationTextOf(ctx)).not.toContain(
+				"Running: git commit -m pi-sync: capture local changes before pull",
+			);
+			expect(notificationTextOf(ctx)).toContain("pi-sync: Stopping...");
+			await vi.advanceTimersByTimeAsync(999);
+			expect(notificationTextOf(ctx)).not.toContain(
+				"pi-sync: Cancelled by user.",
+			);
+			await vi.advanceTimersByTimeAsync(1);
+			await pending;
+
+			expect(notificationTextOf(ctx)).toContain("pi-sync: Cancelled by user.");
 			expect(ctx.ui.statusUpdates).toEqual([]);
 		} finally {
 			runSpy.mockRestore();
+			vi.useRealTimers();
 		}
 	});
 });

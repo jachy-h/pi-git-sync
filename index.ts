@@ -26,6 +26,7 @@ import type { RunOptions, RunResult } from "./src/operation-result.ts";
 
 const COMMAND_SETTLE_GRACE_MS = 100;
 const ELAPSED_REFRESH_MS = 1000;
+const USER_CANCELLATION_NOTICE_DELAY_MS = 1_000;
 const PISYNC_RUN_TIMEOUT_MS = 60_000;
 
 function formatElapsed(elapsedMs: number): string {
@@ -262,6 +263,7 @@ async function handlePiSync(
 		let removeTerminalInputListener: (() => void) | undefined;
 		let watchdogResolve: ((result: RunResult) => void) | undefined;
 		let cancellationResolve: ((result: RunResult) => void) | undefined;
+		let cancellationNotification: Promise<void> | undefined;
 		let lastPublishedProgress: string | undefined;
 		let watchdogFired = false;
 		let cancelled = false;
@@ -284,6 +286,7 @@ async function handlePiSync(
 		// for replacing an existing conversation entry, so publish the active phase
 		// and its elapsed time once per second while sync is in progress.
 		const publishProgress = () => {
+			if (controller.signal.aborted) return;
 			const progress = renderProgress();
 			if (progress === lastPublishedProgress) return;
 			lastPublishedProgress = progress;
@@ -302,6 +305,12 @@ async function handlePiSync(
 		const cancel = () => {
 			if (controller.signal.aborted) return;
 			cancelled = true;
+			ctx.ui.notify("pi-sync: Stopping...", "info");
+			cancellationNotification = new Promise<void>((resolve) =>
+				setTimeout(resolve, USER_CANCELLATION_NOTICE_DELAY_MS),
+			).then(() => {
+				ctx.ui.notify("pi-sync: Cancelled by user.", "warning");
+			});
 			cancellationResolve?.({
 				ok: false,
 				code: "partial_failure",
@@ -328,12 +337,14 @@ async function handlePiSync(
 				...options,
 				signal: controller.signal,
 				onProgress: (phase, message) => {
+					if (controller.signal.aborted) return;
 					clearDeadline();
 					currentPhase = phase;
 					currentMessage = message;
 					publishProgress();
 				},
 				onGitCommandStart: (phase, command, timeoutMs) => {
+					if (controller.signal.aborted) return;
 					clearDeadline();
 					currentPhase = phase;
 					currentMessage = `Running: ${command} (timeout: ${Math.ceil(timeoutMs / 1000)}s)...`;
@@ -397,11 +408,11 @@ async function handlePiSync(
 					),
 				]);
 			}
-			ctx.ui.notify(`pi-sync: Cancelled after ${elapsed()}.`, "warning");
+			await cancellationNotification;
 			return null;
 		} catch (error) {
 			if (!controller.signal.aborted) throw error;
-			ctx.ui.notify(`pi-sync: Cancelled after ${elapsed()}.`, "warning");
+			await cancellationNotification;
 			return null;
 		} finally {
 			clearDeadline();
