@@ -86,10 +86,13 @@ After changing your configuration, run:
 ```
 
 The command pulls remote changes first, then captures and pushes local changes.
-While it runs, the status line shows elapsed time; press `Esc` to cancel and
-terminate active subprocesses. An active sync run is also stopped automatically
-at 60 seconds. It recognizes older generated settings placeholders with an empty
-sync baseline and calibrates that state without file copying.
+While it runs, the status line shows elapsed time. Press `Esc` to cancel and
+terminate active Git/SSH subprocesses; a run is also stopped automatically after
+60 seconds. The `pullTimeoutMs` setting controls each pull, fetch, and rebase
+operation within that limit. If package changes need approval, pi-git-sync pauses
+before applying them and resumes after approval. Older generated settings
+placeholders with an empty sync baseline are recognized and calibrated without
+copying files.
 
 ---
 
@@ -212,20 +215,20 @@ capture (agent → repo working tree)
 Each device has one persistent, unique remote snapshot branch: `pisync-device/<hostname>-<UUID>`. A hostname is not unique; the UUID is stored only in `<config-repo>/.pi-sync/state.json`. That directory is Git-ignored and never synced. The tool therefore never scans remote branches and guesses a “unique device branch.”
 
 On conflict, pi-git-sync pushes current-device changes to that device branch and
-restores the configured branch to remote `main` (or `pi-sync.json.branch`). It
-then automatically merges the device branch and pushes the result whenever Git
-can merge it cleanly. Only a real content conflict or a concurrent remote update
+restores the configured branch to the remote configured branch. It then
+automatically merges the device branch and pushes the result whenever Git can
+merge it cleanly. Only a real content conflict or a concurrent remote update
 requires manual resolution:
 
 ```bash
 cd <sync-repository>
 git fetch origin
-git switch main
+git switch <configured-branch>
 git merge origin/pisync-device/<hostname>-<UUID>
 # resolve conflicts, then
 git add <files>
 git commit
-git push origin main
+git push origin <configured-branch>
 ```
 
 ### Pull Flow
@@ -291,7 +294,9 @@ npm audit --audit-level=high
 When upgrading from `0.2.x` (or an older compatible state), keep the existing config repository and run `/pisync`.
 The local sync state migrates from schema v2 to v3 after backing up the old state.
 Equal local/repo files are reconciled; conflicting files are preserved and reported
-instead of choosing a side.
+instead of choosing a side. The v0.3 command set removes the old write subcommands;
+use `/pisync` for setup and complete synchronization, and `/pisync status` or
+`/pisync diff` for inspection.
 
 See [the full upgrade guide](./docs/upgrade.md).
 
