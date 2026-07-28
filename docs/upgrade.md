@@ -49,6 +49,17 @@ rebase. The tool no longer infers the target from the current branch or assumes 
 A clean worktree may be switched to the configured branch. Dirty, merge, and rebase states
 are blocked instead of being switched automatically.
 
+## Conflict handling in v0.4
+
+A true content conflict now presents explicit choices from `/pisync`: agent-assisted
+semantic merge, manual abort, current-device content for conflict paths, or shared-remote
+content for conflict paths. `Use local` and `Use remote` do not replace an entire branch;
+non-conflicting changes from both sides remain in the normal merge commit. The current-device
+branch remains on `origin` for recovery, and neither flow uses force push.
+
+Abort remains compatible with the v0.3 manual workflow: merge the published device branch
+into the configured shared branch, push normally, then run `/pisync` again.
+
 ## Package approval
 
 New or changed sources in `sync/settings.json` require explicit approval before Pi runs

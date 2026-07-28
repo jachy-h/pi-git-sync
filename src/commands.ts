@@ -30,6 +30,7 @@ import {
 	gitCommit,
 	getHeadCommit,
 	hasUnmergedPaths,
+	listUnmergedPaths,
 	isWorktreeClean,
 	gitExec,
 	gitProbe,
@@ -46,14 +47,18 @@ import { SyncLock } from "./lock.ts";
 import { scanSecrets } from "./security.ts";
 import { ensureDeviceId, loadState, saveState, updateState } from "./state.ts";
 import type { SyncState } from "./state.ts";
+import { isSyncConflictRequest } from "./operation-result.ts";
 import type {
 	CommandResult,
 	ResultCode,
 	RunOptions,
 	RunResult,
+	SyncConflictPath,
+	SyncConflictRequest,
 	SyncPhase,
 } from "./operation-result.ts";
 import { captureChanges } from "./capture.ts";
+import { resolveAutomaticConflict } from "./conflict-resolution.ts";
 import { compareFiles, hasLocalChanges, sha256 } from "./inventory.ts";
 import { validateFiles } from "./validate.ts";
 import {
@@ -74,7 +79,7 @@ import {
 
 // ========== 路径工具 ==========
 
-export function getAgentDir(): string {
+function getAgentDir(): string {
 	const envDir = process.env.PI_CODING_AGENT_DIR;
 	if (envDir) return envDir;
 
@@ -108,7 +113,7 @@ export async function getRepoPath(configOverride?: string): Promise<string> {
  * Always let Git attempt the switch. Compatible local changes can move with
  * the user; incompatible changes or an active operation are rejected by Git.
  */
-export async function ensureConfiguredBranch(
+async function ensureConfiguredBranch(
 	repoPath: string,
 	branch: string,
 ): Promise<boolean> {
@@ -164,6 +169,7 @@ export interface PushPreparation {
 	repoPath: string;
 	branch: string;
 	message?: string;
+	conflict?: SyncConflictRequest;
 }
 
 export type LifecycleState =
@@ -193,6 +199,39 @@ function normalizeInitResult(result: InitInternalResult): InitResult {
 	};
 }
 
+function conflictPathsFrom(
+	conflicts: ReadonlyArray<{
+		relativePath: string;
+		changeType: string;
+	}>,
+): SyncConflictPath[] {
+	const paths = new Map<string, SyncConflictPath>();
+	for (const conflict of conflicts) {
+		const changeType = [
+			"both_modified",
+			"local_modified_remote_deleted",
+			"local_deleted_remote_modified",
+		].includes(conflict.changeType)
+			? (conflict.changeType as SyncConflictPath["changeType"])
+			: "git_conflict";
+		paths.set(conflict.relativePath, {
+			relativePath: conflict.relativePath,
+			changeType,
+		});
+	}
+	return [...paths.values()].sort((a, b) =>
+		a.relativePath.localeCompare(b.relativePath),
+	);
+}
+
+function conflictFromDetails(
+	details: unknown,
+): SyncConflictRequest | undefined {
+	if (!details || typeof details !== "object") return undefined;
+	const conflict = (details as { conflict?: unknown }).conflict;
+	return isSyncConflictRequest(conflict) ? conflict : undefined;
+}
+
 function resultFromPreparation(preparation: PushPreparation): CommandResult {
 	if (preparation.kind === "ready") {
 		return {
@@ -211,7 +250,9 @@ function resultFromPreparation(preparation: PushPreparation): CommandResult {
 			preparation.message ??
 			(preparation.kind === "noop" ? "No changes to push." : "Push blocked."),
 		reload: false,
-		details: preparation,
+		details: preparation.conflict
+			? { ...preparation, conflict: preparation.conflict }
+			: preparation,
 	};
 }
 
@@ -225,6 +266,183 @@ export class PiSyncCommands {
 	constructor(agentDir?: string) {
 		this.agentDir = agentDir ?? getAgentDir();
 		this.lock = new SyncLock(join(this.agentDir, ".pi-sync"));
+	}
+
+	/** Return the configured repository for display-only extension handoffs. */
+	async getConflictRepoPath(): Promise<string | null> {
+		const state = await loadState(this.agentDir);
+		return state.repoPath && existsSync(state.repoPath) ? state.repoPath : null;
+	}
+
+	/** Resolve a user-confirmed conflict choice without trusting UI-supplied paths. */
+	async resolveConflict(
+		request: SyncConflictRequest,
+		choice: import("./operation-result.ts").AutomaticConflictChoice,
+		options: Pick<
+			RunOptions,
+			"packageApproval" | "signal" | "onProgress" | "onGitCommandStart"
+		> = {},
+	): Promise<RunResult> {
+		return await withOperationSignal(options.signal, async () => {
+			const lifecycle = await this.inspectLifecycleState();
+			if (lifecycle.kind !== "initialized") {
+				return {
+					ok: false,
+					code: "blocked_conflict",
+					message:
+						"Sync repository is not ready to resolve this conflict. Run /pisync again.",
+					reload: false,
+					mode: "sync",
+					phase: "preflight",
+				};
+			}
+			const acquired = await this.lock.acquire("resolve-conflict", 5000);
+			if (!acquired) {
+				return {
+					ok: false,
+					code: "partial_failure",
+					message: "Another sync operation is in progress.",
+					reload: false,
+					mode: "sync",
+					phase: "preflight",
+				};
+			}
+
+			try {
+				const rp = lifecycle.repoPath;
+				const config = await loadPiSyncConfig(rp);
+				const state = await loadState(this.agentDir);
+				const expectedDeviceBranch = await this.getDeviceBranchName();
+				if (
+					request.sharedBranch !== config.branch ||
+					request.deviceBranch !== expectedDeviceBranch
+				) {
+					return {
+						ok: false,
+						code: "blocked_conflict",
+						message:
+							"This conflict request is stale or belongs to another device. Run /pisync again.",
+						reload: false,
+						mode: "sync",
+						phase: "preflight",
+					};
+				}
+
+				this.emitProgress(
+					options.onProgress,
+					"pull",
+					"Resolving selected conflict paths...",
+				);
+				const resolution = await resolveAutomaticConflict({
+					repoPath: rp,
+					request,
+					choice,
+					beforeCommit: async () => {
+						const files = await this.getRepoSyncFiles(rp, config);
+						const validation = await validateFiles(rp, config, files);
+						if (validation.blocked) {
+							return {
+								code: "blocked_validation" as const,
+								message: formatValidationErrors(validation.errors),
+							};
+						}
+						try {
+							const packagePlan = await preparePackagePlan(
+								rp,
+								this.agentDir,
+								config,
+							);
+							if (
+								packagePlan.approvalRequired.length > 0 &&
+								(!options.packageApproval ||
+									!approvePackagePlan(packagePlan, options.packageApproval)
+										.approved)
+							) {
+								return {
+									code: "approval_required" as const,
+									message: `Package approval required before resolving settings: ${packagePlan.approvalRequired.join(", ")}`,
+									packages: packagePlan.approvalRequired,
+								};
+							}
+						} catch (error) {
+							return {
+								code: "blocked_validation" as const,
+								message: `Package validation failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+							};
+						}
+						if (config.security.scanSecretsBeforePush) {
+							const findings = await this.scanForSecrets(rp, config);
+							if (findings.length > 0) {
+								return {
+									code: "blocked_secret" as const,
+									message: `Potential secrets detected.\n${formatSecretsFindings(findings)}`,
+								};
+							}
+						}
+						return undefined;
+					},
+				});
+
+				if (resolution.kind !== "resolved") {
+					const refreshed =
+						resolution.kind === "stale"
+							? await this.createSyncConflictRequest(
+									rp,
+									config,
+									request.deviceBranch,
+									request.paths,
+								).catch(() => request)
+							: request;
+					return {
+						ok: false,
+						code:
+							resolution.kind === "blocked"
+								? (resolution.code ?? "blocked_validation")
+								: "blocked_conflict",
+						message: resolution.message,
+						reload: false,
+						mode: "sync",
+						phase: "pull",
+						details: {
+							conflict: refreshed,
+							packages:
+								resolution.kind === "blocked" ? resolution.packages : undefined,
+						},
+					};
+				}
+
+				this.emitProgress(
+					options.onProgress,
+					"apply",
+					"Applying resolved configuration...",
+				);
+				const remoteConflictPaths =
+					choice === "use_remote"
+						? new Set(request.paths.map((path) => path.relativePath))
+						: undefined;
+				const apply = await this.applyCurrent(
+					rp,
+					config,
+					state,
+					"conflict-resolution",
+					options.packageApproval,
+					true,
+					remoteConflictPaths,
+				);
+				return {
+					...apply,
+					message: `Conflict resolved using ${choice === "use_local" ? "current-device" : "shared remote"} content.\n${apply.message}`,
+					mode: "sync",
+					phase: apply.code === "approval_required" ? "apply" : "complete",
+					details:
+						typeof apply.details === "object" && apply.details !== null
+							? (apply.details as RunResult["details"])
+							: undefined,
+				};
+			} finally {
+				await this.lock.release();
+			}
+		});
 	}
 
 	/**
@@ -339,6 +557,7 @@ export class PiSyncCommands {
 				typeof pull.details === "object" && pull.details !== null
 					? (pull.details as { packages?: unknown })
 					: undefined;
+			const conflict = conflictFromDetails(pull.details);
 			return {
 				...pull,
 				mode: "sync",
@@ -346,6 +565,7 @@ export class PiSyncCommands {
 				reload: initialReload || pull.reload,
 				details: {
 					pull,
+					conflict,
 					packages: Array.isArray(pullDetails?.packages)
 						? pullDetails.packages
 						: undefined,
@@ -369,7 +589,11 @@ export class PiSyncCommands {
 			reload: initialReload || pull.reload || push.reload,
 			mode: "sync",
 			phase: "complete",
-			details: { pull, push },
+			details: {
+				pull,
+				push,
+				conflict: conflictFromDetails(push.details),
+			},
 		};
 	}
 
@@ -509,6 +733,41 @@ export class PiSyncCommands {
 		return deviceBranch;
 	}
 
+	private async createSyncConflictRequest(
+		repoPath: string,
+		config: PiSyncConfig,
+		deviceBranch: string,
+		paths: SyncConflictPath[],
+	): Promise<SyncConflictRequest> {
+		const [sharedRef, deviceRef] = await Promise.all([
+			gitProbe(repoPath, [
+				"show-ref",
+				"--hash",
+				"--verify",
+				`refs/remotes/origin/${config.branch}`,
+			]),
+			gitProbe(repoPath, [
+				"show-ref",
+				"--hash",
+				"--verify",
+				`refs/remotes/origin/${deviceBranch}`,
+			]),
+		]);
+		if (!deviceRef.ok || !deviceRef.stdout.trim()) {
+			throw new Error(
+				`Current-device branch origin/${deviceBranch} was not published.`,
+			);
+		}
+		return {
+			kind: "sync_conflict",
+			sharedBranch: config.branch,
+			deviceBranch,
+			sharedHead: sharedRef.ok ? sharedRef.stdout.trim() : undefined,
+			deviceHead: deviceRef.stdout.trim(),
+			paths,
+		};
+	}
+
 	private formatManualMergeMessage(
 		repoPath: string,
 		config: PiSyncConfig,
@@ -587,7 +846,11 @@ export class PiSyncCommands {
 		repoPath: string,
 		config: PiSyncConfig,
 		state: SyncState,
-	): Promise<{ branch: string; fastForwarded: boolean }> {
+	): Promise<{
+		branch: string;
+		fastForwarded: boolean;
+		paths: SyncConflictPath[];
+	}> {
 		const branch = await this.getDeviceBranchName();
 		await gitExec(repoPath, ["switch", "-C", branch]);
 		try {
@@ -598,6 +861,7 @@ export class PiSyncCommands {
 				state,
 				{ preferLocalOnConflicts: true },
 			);
+			const paths = conflictPathsFrom(capture.conflicts);
 			if (capture.errors.length > 0 || capture.denied.length > 0) {
 				throw new Error(
 					`Could not preserve current-device changes on ${branch}: ${[
@@ -616,14 +880,14 @@ export class PiSyncCommands {
 			if (
 				!(await canFastForward(repoPath, `origin/${config.branch}`, branch))
 			) {
-				return { branch, fastForwarded: false };
+				return { branch, fastForwarded: false, paths };
 			}
 
 			await gitExec(repoPath, ["switch", config.branch]);
 			await gitExec(repoPath, ["merge", "--ff-only", branch]);
 			try {
 				await gitPush(repoPath, config.branch);
-				return { branch, fastForwarded: true };
+				return { branch, fastForwarded: true, paths };
 			} catch (error) {
 				const output =
 					error instanceof GitCommandError
@@ -642,7 +906,7 @@ export class PiSyncCommands {
 					config.branch,
 					`origin/${config.branch}`,
 				]);
-				return { branch, fastForwarded: false };
+				return { branch, fastForwarded: false, paths };
 			}
 		} finally {
 			await gitExec(repoPath, ["switch", config.branch]);
@@ -997,6 +1261,12 @@ export class PiSyncCommands {
 								message: `${this.formatMergedConflictMessage(config)}\n${applyResult.message}`,
 							};
 						}
+						const conflict = await this.createSyncConflictRequest(
+							rp,
+							config,
+							preservation.branch,
+							preservation.paths,
+						);
 						return {
 							ok: false,
 							code: "blocked_conflict",
@@ -1006,6 +1276,7 @@ export class PiSyncCommands {
 								preservation.branch,
 							),
 							reload: false,
+							details: { conflict },
 						};
 					} catch (error) {
 						return {
@@ -1073,15 +1344,30 @@ export class PiSyncCommands {
 					reportGitStart(command);
 					const rebase = await gitRebase(rp, config.branch, gitOptions);
 					if (rebase.conflict) {
+						const paths = conflictPathsFrom(
+							(await listUnmergedPaths(rp)).map((relativePath) => ({
+								relativePath:
+									this.normalizeRepoChangedFiles([relativePath], config)[0] ??
+									relativePath,
+								changeType: "git_conflict",
+							})),
+						);
 						const branch = await this.preserveRebaseConflictOnDeviceBranch(
 							rp,
 							config,
+						);
+						const conflict = await this.createSyncConflictRequest(
+							rp,
+							config,
+							branch,
+							paths,
 						);
 						return {
 							ok: false,
 							code: "blocked_conflict",
 							message: this.formatManualMergeMessage(rp, config, branch),
 							reload: false,
+							details: { conflict },
 						};
 					}
 				} catch (error) {
@@ -1287,6 +1573,12 @@ export class PiSyncCommands {
 							message: `${resolutionMessage}\n${applyResult.message}`,
 						};
 					}
+					const conflict = await this.createSyncConflictRequest(
+						rp,
+						config,
+						preservation.branch,
+						preservation.paths,
+					);
 					return {
 						kind: "blocked",
 						capture,
@@ -1301,6 +1593,7 @@ export class PiSyncCommands {
 							config,
 							preservation.branch,
 						),
+						conflict,
 					};
 				} catch (error) {
 					return {
@@ -1526,6 +1819,14 @@ export class PiSyncCommands {
 					const rebaseResult = await gitRebase(rp, preparation.branch);
 					if (rebaseResult.conflict) {
 						try {
+							const paths = conflictPathsFrom(
+								(await listUnmergedPaths(rp)).map((relativePath) => ({
+									relativePath:
+										this.normalizeRepoChangedFiles([relativePath], config)[0] ??
+										relativePath,
+									changeType: "git_conflict",
+								})),
+							);
 							const branch = await this.preserveRebaseConflictOnDeviceBranch(
 								rp,
 								config,
@@ -1533,11 +1834,18 @@ export class PiSyncCommands {
 							if (
 								!(await this.mergeDeviceBranchIntoShared(rp, config, branch))
 							) {
+								const conflict = await this.createSyncConflictRequest(
+									rp,
+									config,
+									branch,
+									paths,
+								);
 								return {
 									ok: false,
 									code: "blocked_conflict",
 									message: this.formatManualMergeMessage(rp, config, branch),
 									reload: false,
+									details: { conflict },
 								};
 							}
 
@@ -2455,15 +2763,19 @@ export class PiSyncCommands {
 		reason: string,
 		packageApproval?: PackageApproval,
 		automaticConflictResolutionAttempted = false,
+		useRemoteForConflicts?: ReadonlySet<string>,
 	): Promise<CommandResult> {
 		const commit = await getHeadCommit(rp);
 		const lines: string[] = [];
 
 		// 1. 生成 apply 计划（包含完整 nextBaseline）
-		const plan = await planMaterialize(this.agentDir, rp, config, state);
+		const plan = await planMaterialize(this.agentDir, rp, config, state, {
+			useRemoteForConflicts,
+		});
 
 		if (plan.blocked) {
 			const errorLines: string[] = [];
+			let conflictRequest: SyncConflictRequest | undefined;
 			if (plan.conflicts.length > 0 && automaticConflictResolutionAttempted) {
 				return {
 					ok: false,
@@ -2514,6 +2826,14 @@ export class PiSyncCommands {
 							message: `${this.formatMergedConflictMessage(config)}\n${resolved.message}`,
 						};
 					}
+					conflictRequest = await this.createSyncConflictRequest(
+						rp,
+						config,
+						preservation.branch,
+						preservation.paths.length > 0
+							? preservation.paths
+							: conflictPathsFrom(plan.conflicts),
+					);
 					errorLines.push(
 						this.formatManualMergeMessage(rp, config, preservation.branch),
 					);
@@ -2533,6 +2853,7 @@ export class PiSyncCommands {
 				message: errorLines.join("\n"),
 				reload: false,
 				details: {
+					conflict: conflictRequest,
 					conflicts: plan.conflicts,
 					validationErrors: plan.validationErrors,
 				},

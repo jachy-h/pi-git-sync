@@ -215,10 +215,17 @@ capture (agent → repo working tree)
 Each device has one persistent, unique remote snapshot branch: `pisync-device/<hostname>-<UUID>`. A hostname is not unique; the UUID is stored only in `<config-repo>/.pi-sync/state.json`. That directory is Git-ignored and never synced. The tool therefore never scans remote branches and guesses a “unique device branch.”
 
 On conflict, pi-git-sync pushes current-device changes to that device branch and
-restores the configured branch to the remote configured branch. It then
-automatically merges the device branch and pushes the result whenever Git can
-merge it cleanly. Only a real content conflict or a concurrent remote update
-requires manual resolution:
+restores the configured branch to the remote configured branch. Clean Git merges
+still complete automatically. A real content conflict presents four explicit choices:
+
+- **Ask agent to merge** sends the current Pi agent a constrained semantic merge task.
+- **Abort — I'll merge manually** keeps both branches unchanged and shows the commands below.
+- **Use local for conflicts** selects current-device content only for unresolved paths.
+- **Use remote for conflicts** selects shared-branch content only for unresolved paths.
+
+The local/remote choices re-fetch, validate the branch OIDs and worktree, create a
+normal merge commit, validate content and secrets, and push without force. Non-conflict
+changes from both sides remain in the merge and the device branch is always retained.
 
 ```bash
 cd <sync-repository>
@@ -229,6 +236,7 @@ git merge origin/pisync-device/<hostname>-<UUID>
 git add <files>
 git commit
 git push origin <configured-branch>
+# return to Pi and run /pisync again
 ```
 
 ### Pull Flow
@@ -322,7 +330,7 @@ pi-git-sync/
 │   ├── validate.ts        # File content validation (JSON, conflict markers, portability)
 │   ├── state.ts           # Sync state persistence (baseline)
 │   ├── packages.ts        # Package reconciliation (settings.json packages[])
-│   ├── settings.ts        # Utility functions (deepMerge, deepEqual — legacy)
+│   ├── conflict-resolution.ts # Path-level local/remote merge transaction
 │   ├── glob.ts            # Custom minimatch glob + hard deny + path filtering
 │   └── ui.ts              # Output formatting
 └── test/
@@ -330,7 +338,7 @@ pi-git-sync/
     ├── git.test.ts
     ├── lock.test.ts
     ├── materialize.test.ts
-    ├── minimatch.test.ts
+    ├── conflict-resolution.test.ts
     ├── packages.test.ts
     ├── security.test.ts
     └── settings.test.ts

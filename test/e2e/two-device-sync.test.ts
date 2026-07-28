@@ -215,6 +215,16 @@ describe.sequential("Two-device sync E2E", () => {
 				expect(pushB.message).toMatch(
 					/git merge origin\/pisync-device\/[^\s]+/,
 				);
+				expect(pushB.details?.conflict).toMatchObject({
+					kind: "sync_conflict",
+					sharedBranch: "main",
+					deviceBranch: expect.stringMatching(/^pisync-device\//),
+					paths: [
+						{
+							relativePath: "prompts/welcome.md",
+						},
+					],
+				});
 
 				// B's agent should NOT have been modified
 				expect(
@@ -225,4 +235,78 @@ describe.sequential("Two-device sync E2E", () => {
 			}
 		});
 	});
+
+	it.each([
+		["use_local", "change from B\n"],
+		["use_remote", "change from A\n"],
+	] as const)(
+		"resolves a two-device content conflict with %s",
+		async (choice, expected) => {
+			await withTestEnvironment(async (envA) => {
+				const fixture = await createGitFixture(envA.rootDir);
+				const baselineContent = "baseline\n";
+				await seedAndPush(fixture.deviceAPath, {
+					"prompts/welcome.md": baselineContent,
+				});
+				await envA.writeAgentFile("prompts/welcome.md", baselineContent);
+				await saveState(
+					envA.agentDir,
+					createSyncState({
+						repoPath: fixture.deviceAPath,
+						files: {
+							"prompts/welcome.md": {
+								sha256: sha256(baselineContent),
+								mode: 0o644,
+							},
+						},
+					}),
+				);
+
+				const { createTestEnvironment: createEnv } = await import(
+					"../helpers/temp-env.ts"
+				);
+				const envB = await createEnv("pi-git-sync-resolution-e2e-");
+				try {
+					await runGit(envA.rootDir, [
+						"clone",
+						fixture.remotePath,
+						envB.repoDir,
+					]);
+					await configureGitRepository(envB.repoDir);
+					await envB.writeAgentFile("prompts/welcome.md", baselineContent);
+					await saveState(
+						envB.agentDir,
+						createSyncState({
+							repoPath: envB.repoDir,
+							files: {
+								"prompts/welcome.md": {
+									sha256: sha256(baselineContent),
+									mode: 0o644,
+								},
+							},
+						}),
+					);
+
+					await envA.writeAgentFile("prompts/welcome.md", "change from A\n");
+					expect((await new PiSyncCommands(envA.agentDir).run()).ok).toBe(true);
+
+					await envB.writeAgentFile("prompts/welcome.md", "change from B\n");
+					const bCommands = new PiSyncCommands(envB.agentDir);
+					const conflictResult = await bCommands.run();
+					const conflict = conflictResult.details?.conflict;
+					expect(conflict).toMatchObject({ kind: "sync_conflict" });
+					if (!conflict) throw new Error("Expected a structured sync conflict");
+
+					const resolved = await bCommands.resolveConflict(conflict, choice);
+					expect(resolved.ok, resolved.message).toBe(true);
+					expect(
+						await readFile(join(envB.agentDir, "prompts/welcome.md"), "utf-8"),
+					).toBe(expected);
+					expect((await bCommands.run()).code).toBe("noop");
+				} finally {
+					await envB.cleanup();
+				}
+			});
+		},
+	);
 });

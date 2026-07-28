@@ -68,6 +68,11 @@ export interface MaterializePlan {
 	hasStateChanges: boolean;
 }
 
+export interface MaterializeOptions {
+	/** Conflict paths explicitly selected from the shared remote during resolution. */
+	useRemoteForConflicts?: ReadonlySet<string>;
+}
+
 export interface MaterializeResult {
 	/** 成功写入的文件 */
 	written: string[];
@@ -125,6 +130,7 @@ export async function planMaterialize(
 	repoPath: string,
 	config: PiSyncConfig,
 	state: SyncState,
+	options: MaterializeOptions = {},
 ): Promise<MaterializePlan> {
 	const safeRoot = await resolveRepoSyncRoot(repoPath, config.root, "read");
 	const inventory = await compareFiles(agentDir, repoPath, config, state);
@@ -142,9 +148,10 @@ export async function planMaterialize(
 	// 收集冲突
 	plan.conflicts = inventory.comparisons.filter(
 		(c) =>
-			c.changeType === "both_modified" ||
-			c.changeType === "local_modified_remote_deleted" ||
-			c.changeType === "local_deleted_remote_modified",
+			(c.changeType === "both_modified" ||
+				c.changeType === "local_modified_remote_deleted" ||
+				c.changeType === "local_deleted_remote_modified") &&
+			!options.useRemoteForConflicts?.has(c.relativePath),
 	);
 
 	if (plan.conflicts.length > 0) {
@@ -153,7 +160,11 @@ export async function planMaterialize(
 	}
 
 	// 获取需要 apply 的变更
-	const applicable = getApplicableFiles(inventory.comparisons);
+	const applicable = inventory.comparisons.filter(
+		(comp) =>
+			getApplicableFiles([comp]).length > 0 ||
+			options.useRemoteForConflicts?.has(comp.relativePath) === true,
+	);
 
 	for (const comp of applicable) {
 		const relPath = comp.relativePath;
@@ -163,9 +174,12 @@ export async function planMaterialize(
 			continue;
 		}
 
+		const useRemoteForConflict =
+			options.useRemoteForConflicts?.has(relPath) === true;
 		if (
 			comp.changeType === "remote_created" ||
-			comp.changeType === "remote_only"
+			comp.changeType === "remote_only" ||
+			(useRemoteForConflict && comp.remote !== null)
 		) {
 			// repo 中有新文件或更新的文件 → 写回 agent
 			const repoFilePath = await resolveWithinRoot(safeRoot, relPath, "read");
@@ -223,7 +237,8 @@ export async function planMaterialize(
 			}
 		} else if (
 			(comp.changeType === "remote_deleted" ||
-				comp.changeType === "both_deleted") &&
+				comp.changeType === "both_deleted" ||
+				(useRemoteForConflict && comp.remote === null)) &&
 			config.delete === "tracked" &&
 			state.files[relPath]
 		) {
@@ -243,7 +258,11 @@ export async function planMaterialize(
 	}
 
 	// 构建完整 nextBaseline（按最终预期状态）
-	plan.nextBaseline = await buildNextBaseline(inventory, state);
+	plan.nextBaseline = await buildNextBaseline(
+		inventory,
+		state,
+		options.useRemoteForConflicts,
+	);
 	plan.hasStateChanges = true;
 
 	return plan;
@@ -264,11 +283,24 @@ export async function planMaterialize(
 export async function buildNextBaseline(
 	inventory: { comparisons: FileComparison[] },
 	state: SyncState,
+	useRemoteForConflicts?: ReadonlySet<string>,
 ): Promise<Record<string, BaselineEntry>> {
 	const baseline: Record<string, BaselineEntry> = {};
 
 	for (const comp of inventory.comparisons) {
 		const relPath = comp.relativePath;
+
+		// A selected remote version is now the new baseline even though the
+		// pre-apply inventory still describes a bilateral change.
+		if (useRemoteForConflicts?.has(relPath)) {
+			if (comp.remote) {
+				baseline[relPath] = {
+					sha256: comp.remote.sha256,
+					mode: comp.remote.mode,
+				};
+			}
+			continue;
+		}
 
 		// 跳过 hard deny 文件
 		if (isDenied(relPath)) continue;

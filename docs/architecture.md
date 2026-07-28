@@ -58,7 +58,8 @@ pi-git-sync/
 ├── scripts/
 │   └── bootstrap.sh          # 新机器自举脚本
 ├── src/
-│   ├── commands.ts           # /pisync 命令路由 + push/pull/init 完整流程
+│   ├── commands.ts           # /pisync 编排、冲突 request 与 resolveConflict 入口
+│   ├── conflict-resolution.ts # local/remote 自动选边 Git 事务
 │   ├── config.ts             # pi-sync.json schema v2 加载 & 校验
 │   ├── inventory.ts          # 三方文件比较引擎（baseline vs local vs remote）
 │   ├── capture.ts            # agent → repo 变更捕获
@@ -71,15 +72,13 @@ pi-git-sync/
 │   ├── state.ts              # 同步基线持久化（<config-repo>/.pi-sync/state.json，Git ignored）
 │   ├── packages.ts           # settings.json packages[] 解析、审批、执行与回滚
 │   ├── path-safety.ts        # repo/agent root 与 symlink 边界
-│   ├── operation-result.ts   # 结构化命令结果
+│   ├── operation-result.ts   # 结构化命令结果与 SyncConflictRequest
 │   ├── validate.ts           # JSON / conflict marker / settings 可移植性校验
-│   ├── settings.ts           # v1 遗留（deepMerge/deepEqual）
 │   ├── ui.ts                 # 格式化输出（status/diff/backup/capture）
-│   └── minimatch.ts          # 独立 minimatch 实现（备用）
 └── test/
     ├── helpers/              # temp-env, git-fixture, fake-pi, factories
     ├── e2e/                  # 两设备端到端测试
-    ├── *.test.ts             # 33 个测试文件，282 个测试
+    ├── *.test.ts             # 33 个测试文件，321 个测试
     └── ...
 ```
 

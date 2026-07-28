@@ -87,12 +87,18 @@ export class FakeUi {
 export class FakeCommandContext {
 	ui: FakeUi;
 	readonly mode: "tui" | "rpc";
+	hasUI = true;
+	idle = true;
 	reloadCalls = 0;
 	reloadError: Error | undefined;
 
 	constructor(mode: "tui" | "rpc" = "tui") {
 		this.ui = new FakeUi();
 		this.mode = mode;
+	}
+
+	isIdle(): boolean {
+		return this.idle;
 	}
 
 	async reload(): Promise<void> {
@@ -109,6 +115,17 @@ export type EventHandler = (
 export class FakeExtensionApi {
 	readonly commands = new Map<string, RegisteredCommand>();
 	readonly eventHandlers = new Map<string, EventHandler[]>();
+	readonly sentUserMessages: Array<{
+		content: string;
+		options?: { deliverAs?: "steer" | "followUp" };
+	}> = [];
+
+	sendUserMessage(
+		content: string,
+		options?: { deliverAs?: "steer" | "followUp" },
+	): void {
+		this.sentUserMessages.push({ content, options });
+	}
 
 	registerCommand(name: string, command: RegisteredCommand): void {
 		this.commands.set(name, command);

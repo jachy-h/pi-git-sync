@@ -2,6 +2,20 @@
 
 All notable changes to `@jachy/pi-git-sync` are documented here.
 
+## [0.4.0] - 2026-07-28
+
+### Added
+
+- Structured `sync_conflict` results with shared/device branch OIDs and affected paths.
+- Four-way conflict UI: agent handoff, manual abort, current-device selection, or shared-remote selection.
+- Safe automatic path-level resolution with fresh fetch/ref/worktree validation, normal merge commits, validation, secret scanning, backup/apply, and no force push.
+- Current-device branch retention and modify/delete conflict coverage.
+
+### Changed
+
+- Conflict UI dispatch now uses structured result details rather than message text.
+- Conflict resolution Git primitives live in `src/conflict-resolution.ts`.
+
 ## [0.3.0] - 2026-07-27
 
 ### Added

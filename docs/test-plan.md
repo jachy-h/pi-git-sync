@@ -38,10 +38,9 @@ Tests                                    76 passed
 | `test/init.test.ts` | 空 bare remote 的首次初始化与推送 | 已有仓库、幂等、`--force`、URL 不匹配、clone/fetch 失败 |
 | `test/lock.test.ts` | 获取、释放、并发拒绝、stale lock、读取信息 | 等待超时、损坏锁、非 owner 释放、跨进程竞争、异常退出 |
 | `test/materialize.test.ts` | atomic write、基础 apply、tracked deletion、read/hash | 校验失败、权限/mode、失败回滚、symlink/path escape、多文件部分失败 |
-| `test/minimatch.test.ts` | `*`、`**`、`?` 和部分边界 | 生产路径实际使用的 `src/glob.ts` 内部 matcher 未被直接覆盖 |
 | `test/packages.test.ts` | package diff | 安装/更新/删除命令、参数注入、CLI 缺失、超时和部分失败 |
 | `test/security.test.ts` | hard deny 和常见 secret | 大小写/分隔符绕过、完整文件扫描、误报边界、行号和批量结果 |
-| `test/settings.test.ts` | v1 遗留 deep merge/equal | `mergeSettings` I/O；该模块不是 v2 核心路径 |
+| `test/settings.test.ts` | 已迁移到 `test/helpers` 的遗留 deep merge/equal | 仅测试 helper，不属于 v2 生产路径 |
 
 当前测试尚未直接覆盖或覆盖很少的核心模块包括：
 
@@ -55,7 +54,7 @@ Tests                                    76 passed
 - `src/ui.ts`
 - `src/validate.ts`
 
-当前没有覆盖率 provider、覆盖率阈值和仓库内 CI workflow。`src/minimatch.ts` 目前没有生产调用方，而生产同步路径使用 `src/glob.ts` 中的 matcher；不能用前者的测试覆盖率代替后者。
+当前没有覆盖率 provider、覆盖率阈值和仓库内 CI workflow。生产同步路径使用 `src/glob.ts` 中的 matcher，相关覆盖率应直接针对该模块。
 
 ## 3. 范围与优先级
 
@@ -225,7 +224,7 @@ P0 恢复路径不能只依靠修改文件权限触发，因为 root、Windows �
 | CFG-09 | `pi-sync.json` 不存在、无权限、JSON 损坏 | `loadPiSyncConfig` 返回可理解错误，不吞掉原始原因 | P0 |
 | CFG-10 | 调用方修改返回对象 | 不污染 `DEFAULT_CONFIG` | P1 |
 
-### 6.2 Glob 与路径安全：`src/glob.ts`、`src/minimatch.ts`
+### 6.2 Glob 与路径安全：`src/glob.ts`
 
 覆盖 `*`、`**`、`?`、空字符串、末尾 `/`、连续 `/`、`.`、Unicode、空格、特殊正则字符、隐藏文件和超长路径。核心断言：
 
@@ -238,7 +237,7 @@ P0 恢复路径不能只依靠修改文件权限触发，因为 root、Windows �
 - hidden files（允许的 `.gitignore` 例外）和 symlink 规则与 README 一致。
 - 大小写冲突（如 `Themes/A.json` 与 `themes/a.json`）在大小写不敏感平台上被检测并阻止。
 
-应直接测试 `src/glob.ts` 的生产实现。后续应合并重复 matcher，或增加一致性契约测试，确保 `src/minimatch.ts` 与 `src/glob.ts` 不会静默漂移。
+应直接测试 `src/glob.ts` 的生产实现。v0.4 已删除孤立的重复 matcher，避免安全规则漂移。
 
 ### 6.3 三方比较：`src/inventory.ts`
 
@@ -422,12 +421,9 @@ Secret scan 覆盖 GitHub/OpenAI token、JWT、Bearer token、私钥头、高置
 
 避免只做整段大 snapshot；关键状态、路径和计数应有独立断言。
 
-### 6.15 `src/settings.ts`
+### 6.15 Legacy settings helpers
 
-该模块标注为 v1 遗留。先增加 `mergeSettings` 的 I/O、preserve、hostname 和错误场景测试，再决定：
-
-- 若仍属于兼容 API，保留测试并明确兼容期；
-- 若无生产调用方，建立删除计划，避免长期维护无效覆盖率。
+v0.4 已将仅供测试参考的 deep merge/equal helper 移至 `test/helpers`，并删除生产模块。它们不再表示同步兼容 API。
 
 ## 7. 命令工作流测试：`src/commands.ts`
 
@@ -696,7 +692,7 @@ CI 建议：
 ### 阶段 1：P0 纯逻辑
 
 - 补齐 config、glob/path、security、inventory 13 类矩阵、validate、state。
-- 解决生产 glob matcher 与孤立 `src/minimatch.ts` 的重复测试问题。
+- 直接覆盖生产 glob matcher，并移除孤立重复实现。
 
 **退出条件**：路径逃逸、hard deny、secret、三方分类和 state 提前更新风险均有回归测试。
 

@@ -201,9 +201,17 @@ capture（agent → 仓库工作树）
 每台设备都有一个持久、唯一的远端快照分支：`pisync-device/<主机名>-<UUID>`。主机名不是唯一标识，UUID 仅保存在本机 `<config-repo>/.pi-sync/state.json`；该目录被 Git 忽略，不会参与同步。因此工具不会扫描远端分支后猜测“唯一设备分支”。
 
 发生冲突时，pi-git-sync 会把当前设备的改动推送到该设备分支，并将配置分支
-恢复到远端 `main`（或 `pi-sync.json.branch`）。只要 Git 能无冲突合并，工具会
-自动合并该设备分支并推送结果；仅真正的内容冲突或共享分支被并发更新时才需要
-手动处理：
+恢复到远端 `main`（或 `pi-sync.json.branch`）。Git 可无冲突合并时仍会自动完成；
+真正的内容冲突会显示四个明确选项：
+
+- **Ask agent to merge**：向当前 Pi agent 投递受约束的语义化合并任务。
+- **Abort — I'll merge manually**：不写入 Git，保留两个分支并显示下方命令。
+- **Use local for conflicts**：只对未合并路径采用当前设备内容。
+- **Use remote for conflicts**：只对未合并路径采用共享分支内容。
+
+local/remote 会重新 fetch、校验分支 OID 与工作树，创建普通 merge commit，执行
+内容和敏感信息校验后以普通 push 发布；不会 force push，也不会删除设备分支。
+双方的非冲突改动都会保留在合并结果中。
 
 ```bash
 cd <同步仓库目录>
@@ -214,6 +222,7 @@ git merge origin/pisync-device/<主机名>-<UUID>
 git add <文件>
 git commit
 git push origin main
+# 回到 Pi 并再次执行 /pisync
 ```
 
 ### Pull 流程
@@ -302,7 +311,7 @@ pi-git-sync/
 │   ├── validate.ts        # 文件内容校验（JSON、冲突标记、可移植性）
 │   ├── state.ts           # 同步状态持久化（基线）
 │   ├── packages.ts        # Package reconciliation（settings.json packages[]）
-│   ├── settings.ts        # 工具函数（deepMerge、deepEqual — 遗留）
+│   ├── conflict-resolution.ts # local/remote 路径级合并事务
 │   ├── glob.ts            # 自定义 minimatch glob + hard deny + 路径过滤
 │   └── ui.ts              # 输出格式化
 └── test/
@@ -310,7 +319,7 @@ pi-git-sync/
     ├── git.test.ts
     ├── lock.test.ts
     ├── materialize.test.ts
-    ├── minimatch.test.ts
+    ├── conflict-resolution.test.ts
     ├── packages.test.ts
     ├── security.test.ts
     └── settings.test.ts

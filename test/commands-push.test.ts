@@ -351,6 +351,17 @@ describe.sequential("PiSyncCommands.push", () => {
 				fixture.deviceBPath,
 			);
 			const conflictBranch = result.message.match(/git merge ([^\s]+)/)?.[1];
+			const conflict = (
+				result.details as {
+					conflict?: {
+						kind: string;
+						sharedBranch: string;
+						deviceBranch: string;
+						deviceHead: string;
+						paths: Array<{ relativePath: string; changeType: string }>;
+					};
+				}
+			).conflict;
 
 			expect(result).toMatchObject({
 				reload: false,
@@ -359,6 +370,18 @@ describe.sequential("PiSyncCommands.push", () => {
 			expect(result.message).toContain("git merge origin/pisync-device/");
 			expect(result.message).not.toContain("Agent (local)");
 			expect(conflictBranch).toBeDefined();
+			expect(conflict).toMatchObject({
+				kind: "sync_conflict",
+				sharedBranch: "main",
+				deviceBranch: expect.stringMatching(/^pisync-device\//),
+				deviceHead: expect.any(String),
+				paths: [
+					{
+						relativePath: "prompts/welcome.md",
+						changeType: "git_conflict",
+					},
+				],
+			});
 
 			const state = await loadState(environment.agentDir);
 			expect(state.pendingOperation).toBeNull();
@@ -553,11 +576,15 @@ describe.sequential("PiSyncCommands.push", () => {
 				}),
 			);
 
-			// Write a file with a fake GitHub token pattern
-			await environment.writeAgentFile(
-				"prompts/welcome.md",
-				"ghp_1234567890abcdef1234567890abcdef123456\n",
-			);
+			// Assemble the fake token at runtime so repository scanners do not
+			// mistake this test fixture for a committed credential.
+			const fakeToken = [
+				"gh",
+				"p_",
+				"1234567890abcdef",
+				"1234567890abcdef123456",
+			].join("");
+			await environment.writeAgentFile("prompts/welcome.md", `${fakeToken}\n`);
 
 			const result = await new PiSyncCommands(environment.agentDir).push(
 				fixture.deviceBPath,

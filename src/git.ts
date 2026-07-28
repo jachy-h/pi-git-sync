@@ -715,8 +715,44 @@ export async function isDiverged(
  * 检查是否有未合并的文件
  */
 export async function hasUnmergedPaths(repoPath: string): Promise<boolean> {
-	const result = await gitExec(repoPath, ["ls-files", "--unmerged"]);
-	return result.stdout.trim().length > 0;
+	return (await listUnmergedPaths(repoPath)).length > 0;
+}
+
+export interface GitUnmergedPath {
+	relativePath: string;
+	stages: number[];
+}
+
+/** List unresolved index paths and the available stage numbers for each path. */
+export async function listUnmergedEntries(
+	repoPath: string,
+): Promise<GitUnmergedPath[]> {
+	const result = await gitExec(repoPath, ["ls-files", "--unmerged", "-z"]);
+	const entries = new Map<string, Set<number>>();
+	for (const entry of result.stdout.split("\0")) {
+		if (!entry) continue;
+		const tab = entry.indexOf("\t");
+		const metadata = tab >= 0 ? entry.slice(0, tab) : "";
+		const relativePath = tab >= 0 ? entry.slice(tab + 1) : "";
+		const stage = Number(metadata.split(/\s+/)[2]);
+		if (!relativePath || !Number.isInteger(stage)) continue;
+		const stages = entries.get(relativePath) ?? new Set<number>();
+		stages.add(stage);
+		entries.set(relativePath, stages);
+	}
+	return [...entries.entries()]
+		.map(([relativePath, stages]) => ({
+			relativePath,
+			stages: [...stages].sort((a, b) => a - b),
+		}))
+		.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+}
+
+/** List unique worktree-relative paths with unresolved index entries. */
+export async function listUnmergedPaths(repoPath: string): Promise<string[]> {
+	return (await listUnmergedEntries(repoPath)).map(
+		(entry) => entry.relativePath,
+	);
 }
 
 /**
