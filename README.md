@@ -148,6 +148,7 @@ Also: hidden files (except `.gitignore`) are excluded. Symlinks and symlink comp
     "**/*.log"
   ],
   "delete": "tracked",
+  "pullTimeoutMs": 30000,
   "security": {
     "scanSecretsBeforePush": true
   }
@@ -164,6 +165,7 @@ Also: hidden files (except `.gitignore`) are excluded. Symlinks and symlink comp
 | `include` | `string[]` | — | Glob whitelist (relative to `root`). Supports `*`, `**`, `?` |
 | `exclude` | `string[]` | `[]` | Glob patterns to exclude (lower priority than built-in hard deny) |
 | `delete` | `"tracked"` \| `"none"` | `"tracked"` | `"tracked"`: delete agent files when removed from repo. `"none"`: never delete |
+| `pullTimeoutMs` | `number` | `30000` | Timeout for pull/fetch Git operations in milliseconds; timeout details are returned as an error |
 | `security.scanSecretsBeforePush` | `boolean` | `true` | Scan staged files for secrets (API keys, tokens, private keys) before pushing |
 
 ---

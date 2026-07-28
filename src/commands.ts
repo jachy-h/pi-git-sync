@@ -838,7 +838,7 @@ export class PiSyncCommands {
 					};
 				}
 				try {
-					await gitFetch(rp);
+					await gitFetch(rp, { timeout: config.pullTimeoutMs });
 					switchedBranch = await ensureConfiguredBranch(rp, config.branch);
 					status = await gitStatus(rp);
 				} catch (error) {
@@ -980,7 +980,7 @@ export class PiSyncCommands {
 
 			// 3. Fetch
 			try {
-				await gitFetch(rp);
+				await gitFetch(rp, { timeout: config.pullTimeoutMs });
 			} catch (err) {
 				return {
 					ok: false,
@@ -1025,7 +1025,19 @@ export class PiSyncCommands {
 			}
 
 			// 5. Pull (fast-forward only)
-			const { pulled } = await gitPull(rp, config.branch);
+			let pulled: boolean;
+			try {
+				({ pulled } = await gitPull(rp, config.branch, {
+					timeout: config.pullTimeoutMs,
+				}));
+			} catch (error) {
+				return {
+					ok: false,
+					code: "git_failed",
+					message: `git pull failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+					reload: false,
+				};
+			}
 			const newState = await loadState(this.agentDir);
 			if (!pulled) {
 				// A previous pull may have fast-forwarded before package approval was
@@ -1788,7 +1800,9 @@ export class PiSyncCommands {
 			const status = await gitStatus(defaultPath);
 			if (status.behind > 0) {
 				onProgress?.("Pulling remote changes...");
-				await gitPull(defaultPath, config.branch);
+				await gitPull(defaultPath, config.branch, {
+					timeout: config.pullTimeoutMs,
+				});
 			}
 
 			onProgress?.("Applying config to agent...");
@@ -2051,7 +2065,9 @@ export class PiSyncCommands {
 				lines.push("Valid sync repo detected — fetching latest...");
 				const existingConfig = await loadPiSyncConfig(defaultPath);
 				await ensureConfiguredBranch(defaultPath, existingConfig.branch);
-				const { pulled } = await gitPull(defaultPath, existingConfig.branch);
+				const { pulled } = await gitPull(defaultPath, existingConfig.branch, {
+					timeout: existingConfig.pullTimeoutMs,
+				});
 				lines.push(pulled ? "Updated to latest." : "Already up to date.");
 			}
 
@@ -2804,6 +2820,7 @@ async function scaffoldConfigRepoV2(repoPath: string): Promise<void> {
 		],
 		exclude: ["**/.DS_Store", "**/*.tmp", "**/*.log", "extensions/**/logs/**"],
 		delete: "tracked",
+		pullTimeoutMs: 30000,
 		security: {
 			scanSecretsBeforePush: true,
 		},

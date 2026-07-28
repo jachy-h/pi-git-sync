@@ -60,6 +60,7 @@ export class GitCommandError extends Error {
 	stdout: string;
 	stderr: string;
 	timedOut: boolean;
+	timeoutMs?: number;
 
 	constructor(
 		args: string[],
@@ -68,9 +69,15 @@ export class GitCommandError extends Error {
 		stdout: string,
 		stderr: string,
 		timedOut: boolean,
+		timeoutMs?: number,
 	) {
 		const detail = stderr || stdout || `exit code ${exitCode}`;
-		super(`git ${args[0]} failed: ${detail}`);
+		const command = `git ${args.join(" ")}`;
+		super(
+			timedOut && timeoutMs !== undefined
+				? `${command} timed out after ${timeoutMs} ms: ${detail}`
+				: `${command} failed: ${detail}`,
+		);
 		this.name = "GitCommandError";
 		this.args = args;
 		this.cwd = cwd;
@@ -78,6 +85,7 @@ export class GitCommandError extends Error {
 		this.stdout = stdout;
 		this.stderr = stderr;
 		this.timedOut = timedOut;
+		this.timeoutMs = timeoutMs;
 	}
 
 	/** 是否为认证失败 */
@@ -151,6 +159,7 @@ export async function gitExec(
 			code?: string;
 			killed?: boolean;
 		};
+		const timeoutMs = options?.timeout ?? 30000;
 		const timedOut = error.killed === true || error.code === "ETIMEDOUT";
 		throw new GitCommandError(
 			args,
@@ -163,6 +172,7 @@ export async function gitExec(
 			error.stdout?.trimEnd() ?? "",
 			error.stderr?.trimEnd() ?? error.message ?? "Unknown git error",
 			timedOut,
+			timeoutMs,
 		);
 	}
 }
@@ -344,20 +354,23 @@ export async function gitDiffFiles(
 
 // ========== Fetch / Pull / Push ==========
 
-export async function gitFetch(repoPath: string): Promise<void> {
-	await gitExec(repoPath, ["fetch", "origin"]);
+export async function gitFetch(
+	repoPath: string,
+	options?: { timeout?: number },
+): Promise<void> {
+	await gitExec(repoPath, ["fetch", "origin"], options);
 }
 
 export async function gitPull(
 	repoPath: string,
 	branch: string,
+	options?: { timeout?: number },
 ): Promise<{ pulled: boolean }> {
-	const result = await gitExec(repoPath, [
-		"pull",
-		"--ff-only",
-		"origin",
-		branch,
-	]);
+	const result = await gitExec(
+		repoPath,
+		["pull", "--ff-only", "origin", branch],
+		options,
+	);
 	const pulled =
 		!result.stdout.includes("Already up to date") &&
 		!result.stdout.includes("Already up-to-date");

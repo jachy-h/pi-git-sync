@@ -137,6 +137,7 @@ pi-git-sync 会获取仓库，并将其中的配置应用到这台 Pi 安装。
     "**/*.log"
   ],
   "delete": "tracked",
+  "pullTimeoutMs": 30000,
   "security": {
     "scanSecretsBeforePush": true
   }
@@ -153,6 +154,7 @@ pi-git-sync 会获取仓库，并将其中的配置应用到这台 Pi 安装。
 | `include` | `string[]` | — | Glob 白名单（相对于 `root`）。支持 `*`、`**`、`?` |
 | `exclude` | `string[]` | `[]` | Glob 排除列表（优先级低于内置 hard deny） |
 | `delete` | `"tracked"` \| `"none"` | `"tracked"` | `"tracked"`：仓库删除时同步删除 agent 文件。`"none"`：永不删除 |
+| `pullTimeoutMs` | `number` | `30000` | pull/fetch Git 操作超时时间（毫秒）；超时会返回异常信息 |
 | `security.scanSecretsBeforePush` | `boolean` | `true` | 推送前扫描敏感信息（API Key、Token、私钥等） |
 
 ---
