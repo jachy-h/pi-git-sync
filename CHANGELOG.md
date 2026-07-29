@@ -2,7 +2,7 @@
 
 All notable changes to `@jachy/pi-git-sync` are documented here.
 
-## [0.5.0] - Unreleased
+## [0.5.0] - 2026-07-29
 
 ### Added
 
@@ -59,4 +59,5 @@ All notable changes to `@jachy/pi-git-sync` are documented here.
 - Legacy pending operations are recovered by the next `/pisync` invocation.
 - See [the upgrade guide](docs/upgrade.md) for migration and rollback notes.
 
+[0.5.0]: https://github.com/jachy-h/pi-git-sync/releases/tag/v0.5.0
 [0.3.0]: https://github.com/jachy-h/pi-git-sync/releases/tag/v0.3.0
