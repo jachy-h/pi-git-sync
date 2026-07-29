@@ -48,11 +48,12 @@ async function git(args: string[], opts: { cwd: string }): Promise<void> {
 	await execFile("git", args, opts);
 }
 
-describe("PiSyncCommands.init (end-to-end with a real git remote)", () => {
+describe("PiSyncCommands.run setup flow (end-to-end with a real git remote)", () => {
 	let workDir: string;
 	let agentDir: string;
 	let remoteDir: string;
 	let localRepoDir: string;
+	let onboardedAgentDir: string;
 	let daemon: ChildProcess | null = null;
 	let port: number;
 	let url: string;
@@ -114,7 +115,7 @@ describe("PiSyncCommands.init (end-to-end with a real git remote)", () => {
 		stubBinDir = join(workDir, "bin");
 		await mkdir(stubBinDir, { recursive: true });
 		const stubPi = join(stubBinDir, "pi");
-		await writeFile(stubPi, "#!/bin/sh\nexit 0\n");
+		await writeFile(stubPi, "#!/bin/sh\necho pi-test\nexit 0\n");
 		await chmod(stubPi, 0o755);
 
 		// The user's global git config rewrites `git://` -> `https://`
@@ -185,23 +186,16 @@ describe("PiSyncCommands.init (end-to-end with a real git remote)", () => {
 		);
 
 		const cmds = new PiSyncCommands();
-		const result = await cmds.init(url);
-		if (!result.ok) {
-			// eslint-disable-next-line no-console
-			console.log(
-				"\n--- INIT RESULT (level=" +
-					result.level +
-					") ---\n" +
-					result.message +
-					"\n---",
-			);
-		}
+		const result = await cmds.run({ gitUrl: url });
 
-		// Init must report overall success — NOT the misleading
+		// Setup must report overall success — NOT the misleading
 		// `Init failed: Cloning ...` we used to see.
-		expect(result.ok).toBe(true);
-		expect(result.level).toBe("info");
-		expect(result.needsReload).toBe(true);
+		expect(result).toMatchObject({
+			ok: true,
+			mode: "setup",
+			phase: "complete",
+			reload: true,
+		});
 		expect(result.message).toContain("Setup complete");
 		expect(result.message).not.toContain("Sync conflict detected");
 		expect(result.message).not.toMatch(/^Init failed:/);
@@ -241,5 +235,65 @@ describe("PiSyncCommands.init (end-to-end with a real git remote)", () => {
 			await execFile("git", ["log", "-1", "--pretty=%B"], { cwd: localRepoDir })
 		).stdout.trim();
 		expect(msg).toBe("pi-sync: initial config scaffold (v2)");
+	}, 30000);
+
+	it("rejects an invalid setup URL before creating a repository", async () => {
+		const isolatedAgentDir = join(workDir, "invalid-url", "agent");
+		await mkdir(isolatedAgentDir, { recursive: true });
+
+		const result = await new PiSyncCommands(isolatedAgentDir).run({
+			gitUrl: "not a git URL",
+		});
+
+		expect(result).toMatchObject({
+			ok: false,
+			code: "blocked_validation",
+			mode: "setup",
+			phase: "preflight",
+			reload: false,
+		});
+		expect(result.message).toContain("Invalid Git URL: not a git URL");
+		expect(existsSync(join(isolatedAgentDir, "..", "config-repo"))).toBe(false);
+	}, 30000);
+
+	it("onboards a new device from an existing remote and then returns noop", async () => {
+		onboardedAgentDir = join(workDir, "machine-b", "agent");
+		await mkdir(onboardedAgentDir, { recursive: true });
+
+		const commands = new PiSyncCommands(onboardedAgentDir);
+		const setup = await commands.run({
+			gitUrl: url,
+			packageApproval: {
+				approvedSources: [
+					"npm:@jachy/pi-git-sync",
+					"npm:pi-lens",
+					"npm:context-mode",
+				],
+			},
+		});
+
+		expect(setup.ok, setup.message).toBe(true);
+		expect(setup).toMatchObject({
+			ok: true,
+			mode: "setup",
+			phase: "complete",
+			reload: true,
+		});
+		expect(
+			JSON.parse(
+				await readFile(join(onboardedAgentDir, "settings.json"), "utf-8"),
+			),
+		).toEqual({
+			packages: ["npm:@jachy/pi-git-sync", "npm:pi-lens", "npm:context-mode"],
+		});
+
+		const repeat = await commands.run();
+		expect(repeat).toMatchObject({
+			ok: true,
+			code: "noop",
+			mode: "sync",
+			phase: "complete",
+			reload: false,
+		});
 	}, 30000);
 });

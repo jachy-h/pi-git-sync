@@ -22,6 +22,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { matchesKey, type SelectItem } from "@earendil-works/pi-tui";
 import { PiSyncCommands } from "./src/commands.ts";
+import { runOperation } from "./src/operation-runner.ts";
 import {
 	isSyncConflictRequest,
 	type ConflictChoice,
@@ -256,175 +257,35 @@ async function handlePiSync(
 	let gitUrl: string | undefined;
 	let packageApproval: RunOptions["packageApproval"];
 
-	const run = async (options: RunOptions = {}): Promise<RunResult | null> => {
-		const startedAt = Date.now();
-		let currentMessage = "Checking sync state...";
-		const controller = new AbortController();
-		let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-		let runDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
-		let elapsedTimer: ReturnType<typeof setInterval> | undefined;
-		let removeTerminalInputListener: (() => void) | undefined;
-		let watchdogResolve: ((result: RunResult) => void) | undefined;
-		let cancellationResolve: ((result: RunResult) => void) | undefined;
-		let cancellationNotification: Promise<void> | undefined;
-		let lastPublishedProgress: string | undefined;
-		let watchdogFired = false;
-		let cancelled = false;
-		let currentPhase: RunResult["phase"] = "preflight";
-		let commandExecution: Promise<RunResult> | undefined;
-		let execution: Promise<RunResult> | undefined;
-		const watchdog = new Promise<RunResult>((resolve) => {
-			watchdogResolve = resolve;
+	const run = (options: RunOptions = {}) =>
+		runOperation({
+			execute: (operationOptions) => cmds.run(operationOptions),
+			runOptions: options,
+			runTimeoutMs: PISYNC_RUN_TIMEOUT_MS,
+			commandSettleGraceMs: COMMAND_SETTLE_GRACE_MS,
+			elapsedRefreshMs: ELAPSED_REFRESH_MS,
+			cancellationNoticeDelayMs: USER_CANCELLATION_NOTICE_DELAY_MS,
+			host: {
+				formatProgress: (elapsedMs, message) =>
+					ctx.ui.theme.fg(
+						"text",
+						`pi-sync [${formatElapsed(elapsedMs)}] ${message}${ctx.mode === "tui" ? " — Esc to cancel" : ""}`,
+					),
+				publishProgress: (message) => ctx.ui.notify(message, "info"),
+				onCancel:
+					ctx.mode === "tui"
+						? (cancel) =>
+								ctx.ui.onTerminalInput((data) => {
+									if (!matchesKey(data, "escape")) return;
+									cancel();
+									return { consume: true };
+								})
+						: undefined,
+				onStopping: () => ctx.ui.notify("pi-sync: Stopping...", "info"),
+				onCancelled: () =>
+					ctx.ui.notify("pi-sync: Cancelled by user.", "warning"),
+			},
 		});
-		const cancellation = new Promise<RunResult>((resolve) => {
-			cancellationResolve = resolve;
-		});
-		const elapsed = () => formatElapsed(Date.now() - startedAt);
-		const renderProgress = () =>
-			ctx.ui.theme.fg(
-				"text",
-				`pi-sync [${elapsed()}] ${currentMessage}${ctx.mode === "tui" ? " — Esc to cancel" : ""}`,
-			);
-		// Pi notifications append to the conversation flow. There is no public API
-		// for replacing an existing conversation entry, so publish the active phase
-		// and its elapsed time once per second while sync is in progress.
-		const publishProgress = () => {
-			if (controller.signal.aborted) return;
-			const progress = renderProgress();
-			if (progress === lastPublishedProgress) return;
-			lastPublishedProgress = progress;
-			ctx.ui.notify(progress, "info");
-		};
-		const clearDeadline = () => {
-			if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
-			deadlineTimer = undefined;
-		};
-		const stopForTimeout = (result: RunResult) => {
-			if (watchdogFired) return;
-			watchdogFired = true;
-			watchdogResolve?.(result);
-			controller.abort();
-		};
-		const cancel = () => {
-			if (controller.signal.aborted) return;
-			cancelled = true;
-			ctx.ui.notify("pi-sync: Stopping...", "info");
-			cancellationNotification = new Promise<void>((resolve) =>
-				setTimeout(resolve, USER_CANCELLATION_NOTICE_DELAY_MS),
-			).then(() => {
-				ctx.ui.notify("pi-sync: Cancelled by user.", "warning");
-			});
-			cancellationResolve?.({
-				ok: false,
-				code: "partial_failure",
-				message: "pi-sync cancelled.",
-				reload: false,
-				mode: "sync",
-				phase: currentPhase,
-			});
-			controller.abort();
-		};
-		const startExecution = () => {
-			if (execution) return execution;
-			runDeadlineTimer = setTimeout(() => {
-				stopForTimeout({
-					ok: false,
-					code: "partial_failure",
-					message: `pi-sync exceeded ${PISYNC_RUN_TIMEOUT_MS / 1000} seconds and was stopped during ${currentPhase}.`,
-					reload: false,
-					mode: "sync",
-					phase: currentPhase,
-				});
-			}, PISYNC_RUN_TIMEOUT_MS);
-			commandExecution = cmds.run({
-				...options,
-				signal: controller.signal,
-				onProgress: (phase, message) => {
-					if (controller.signal.aborted) return;
-					clearDeadline();
-					currentPhase = phase;
-					currentMessage = message;
-					publishProgress();
-				},
-				onGitCommandStart: (phase, command, timeoutMs) => {
-					if (controller.signal.aborted) return;
-					clearDeadline();
-					currentPhase = phase;
-					currentMessage = `Running: ${command} (timeout: ${Math.ceil(timeoutMs / 1000)}s)...`;
-					publishProgress();
-					deadlineTimer = setTimeout(() => {
-						// Resolve the UI command first, then abort the lower-level process.
-						// Even if child-process cleanup itself is broken, Pi regains input.
-						stopForTimeout({
-							ok: false,
-							code: "git_failed",
-							message: `${command} timed out after ${timeoutMs} ms. Sync stopped.`,
-							reload: false,
-							mode: "sync",
-							phase,
-						});
-					}, timeoutMs + COMMAND_SETTLE_GRACE_MS);
-				},
-			});
-			execution = Promise.race([commandExecution, watchdog, cancellation]);
-			return execution;
-		};
-		const awaitExecution = async () => {
-			const result = await startExecution();
-			if ((watchdogFired || cancelled) && commandExecution) {
-				// Give the aborted command a short chance to release its sync lock,
-				// without ever retaining the TUI indefinitely.
-				await Promise.race([
-					commandExecution.then(
-						() => undefined,
-						() => undefined,
-					),
-					new Promise<void>((resolve) =>
-						setTimeout(resolve, COMMAND_SETTLE_GRACE_MS),
-					),
-				]);
-			}
-			return result;
-		};
-
-		publishProgress();
-		elapsedTimer = setInterval(publishProgress, ELAPSED_REFRESH_MS);
-		if (ctx.mode === "tui") {
-			removeTerminalInputListener = ctx.ui.onTerminalInput((data) => {
-				if (!matchesKey(data, "escape") || controller.signal.aborted) return;
-				cancel();
-				return { consume: true };
-			});
-		}
-		try {
-			const result = await awaitExecution();
-			if (!controller.signal.aborted || watchdogFired) return result;
-
-			if (commandExecution) {
-				await Promise.race([
-					commandExecution.then(
-						() => undefined,
-						() => undefined,
-					),
-					new Promise<void>((resolve) =>
-						setTimeout(resolve, COMMAND_SETTLE_GRACE_MS),
-					),
-				]);
-			}
-			await cancellationNotification;
-			return null;
-		} catch (error) {
-			if (!controller.signal.aborted) throw error;
-			await cancellationNotification;
-			return null;
-		} finally {
-			clearDeadline();
-			if (runDeadlineTimer !== undefined) clearTimeout(runDeadlineTimer);
-			if (elapsedTimer !== undefined) clearInterval(elapsedTimer);
-			removeTerminalInputListener?.();
-			controller.abort();
-		}
-	};
 
 	let result = await run();
 	if (result === null) return;

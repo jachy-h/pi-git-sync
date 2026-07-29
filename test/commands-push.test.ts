@@ -40,6 +40,34 @@ async function seedConfigRepo(
 }
 
 describe.sequential("PiSyncCommands.push", () => {
+	it("reports a fast-forwarded device conflict through the shared coordinator", async () => {
+		const commands = new PiSyncCommands();
+		const internal = commands as unknown as {
+			preserveConflictOnDeviceBranch: () => Promise<{
+				branch: string;
+				fastForwarded: boolean;
+				paths: [];
+			}>;
+			coordinateDeviceBranchConflict: (...args: unknown[]) => Promise<{
+				kind: "resolved" | "needs_user";
+				message: string;
+			}>;
+		};
+		internal.preserveConflictOnDeviceBranch = async () => ({
+			branch: "pisync-device/test",
+			fastForwarded: true,
+			paths: [],
+		});
+
+		const result = await internal.coordinateDeviceBranchConflict(
+			"/unused",
+			config,
+			createSyncState(),
+		);
+
+		expect(result).toMatchObject({ kind: "resolved" });
+	});
+
 	it("pushes local changes to the remote and applies the result back to the agent", async () => {
 		await withTestEnvironment(async (environment) => {
 			const fixture = await createGitFixture(environment.rootDir);
@@ -201,6 +229,87 @@ describe.sequential("PiSyncCommands.push", () => {
 				fixture.deviceBPath,
 			);
 			expect(repeated).toMatchObject({ ok: true, code: "noop" });
+		});
+	});
+
+	it("rejects a prepared push after the repository HEAD changes", async () => {
+		await withTestEnvironment(async (environment) => {
+			const fixture = await createGitFixture(environment.rootDir);
+			await seedConfigRepo(fixture.deviceAPath);
+			await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
+			await runGit(fixture.deviceBPath, ["pull", "--ff-only"]);
+			await environment.writeAgentFile("prompts/welcome.md", "base\n");
+			await saveState(
+				environment.agentDir,
+				createSyncState({
+					repoPath: fixture.deviceBPath,
+					files: {
+						"prompts/welcome.md": { sha256: sha256("base\n"), mode: 0o644 },
+					},
+				}),
+			);
+			await environment.writeAgentFile("prompts/welcome.md", "prepared\n");
+
+			const commands = new PiSyncCommands(environment.agentDir);
+			const preparation = await commands.preparePush(fixture.deviceBPath);
+			if (preparation.kind !== "ready") {
+				throw new Error("Expected push preparation to be ready");
+			}
+			await runGit(fixture.deviceBPath, ["add", "--all"]);
+			await runGit(fixture.deviceBPath, [
+				"commit",
+				"--no-gpg-sign",
+				"-m",
+				"Change HEAD after preparation",
+			]);
+
+			const result = await commands.executePush(preparation);
+
+			expect(result).toMatchObject({
+				ok: false,
+				code: "blocked_conflict",
+				reload: false,
+			});
+			expect(result.message).toContain("Push preparation is stale");
+		});
+	});
+
+	it("rejects a prepared push after the agent fingerprint changes", async () => {
+		await withTestEnvironment(async (environment) => {
+			const fixture = await createGitFixture(environment.rootDir);
+			await seedConfigRepo(fixture.deviceAPath);
+			await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
+			await runGit(fixture.deviceBPath, ["pull", "--ff-only"]);
+			await environment.writeAgentFile("prompts/welcome.md", "base\n");
+			await saveState(
+				environment.agentDir,
+				createSyncState({
+					repoPath: fixture.deviceBPath,
+					files: {
+						"prompts/welcome.md": { sha256: sha256("base\n"), mode: 0o644 },
+					},
+				}),
+			);
+			await environment.writeAgentFile("prompts/welcome.md", "prepared\n");
+
+			const commands = new PiSyncCommands(environment.agentDir);
+			const preparation = await commands.preparePush(fixture.deviceBPath);
+			if (preparation.kind !== "ready") {
+				throw new Error("Expected push preparation to be ready");
+			}
+			await environment.writeAgentFile(
+				"prompts/welcome.md",
+				"changed after preparation\n",
+			);
+
+			const result = await commands.executePush(preparation);
+
+			expect(result).toMatchObject({
+				ok: false,
+				code: "blocked_conflict",
+				reload: false,
+			});
+			expect(result.message).toContain("Push preparation is stale");
 		});
 	});
 

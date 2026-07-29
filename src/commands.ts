@@ -13,7 +13,7 @@
 import { existsSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { readFile, mkdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import {
 	gitStatus,
 	gitFetch,
@@ -21,11 +21,9 @@ import {
 	gitPush,
 	gitPushHeadToBranch,
 	gitPushDeviceBranch,
-	gitRenameBranch,
 	gitDiff,
 	gitDiffRange,
 	gitDiffStaged,
-	gitRebase,
 	gitRebaseAbort,
 	gitCommit,
 	getHeadCommit,
@@ -34,18 +32,28 @@ import {
 	isWorktreeClean,
 	gitExec,
 	gitProbe,
-	gitRemoteRefExists,
 	canFastForward,
 	GitCommandError,
 } from "./git.ts";
 import { loadPiSyncConfig } from "./config.ts";
 import { withOperationSignal } from "./operation-context.ts";
 import type { PiSyncConfig } from "./config.ts";
-import { planMaterialize, executeMaterialize } from "./materialize.ts";
-import { createBackup, restoreBackup } from "./backup.ts";
+import { executeApplyTransaction } from "./apply-transaction.ts";
+import {
+	commitCapturedChangesBeforePull,
+	integratePulledHead,
+	preparePullWorktree,
+} from "./pull-phase.ts";
+import { integrateCommittedPush } from "./push-phase.ts";
+import {
+	clearRepoContents,
+	executeSetupFlow,
+	isValidSetupGitUrl,
+} from "./setup-flow.ts";
+import { planMaterialize } from "./materialize.ts";
 import { SyncLock } from "./lock.ts";
 import { scanSecrets } from "./security.ts";
-import { ensureDeviceId, loadState, saveState, updateState } from "./state.ts";
+import { ensureDeviceId, loadState, saveState } from "./state.ts";
 import type { SyncState } from "./state.ts";
 import { isSyncConflictRequest } from "./operation-result.ts";
 import type {
@@ -64,7 +72,6 @@ import { validateFiles } from "./validate.ts";
 import {
 	getPackageDiff,
 	preparePackagePlan,
-	executePackagePlan,
 	approvePackagePlan,
 } from "./packages.ts";
 import type { PackageApproval } from "./packages.ts";
@@ -176,6 +183,14 @@ export type LifecycleState =
 	| { kind: "uninitialized" }
 	| { kind: "initialized"; repoPath: string; state: SyncState }
 	| { kind: "broken"; reason: string; repoPath?: string };
+
+type ConflictCoordinationResult =
+	| { kind: "resolved"; message: string }
+	| {
+			kind: "needs_user";
+			conflict: SyncConflictRequest;
+			message: string;
+	  };
 
 interface InitInternalResult {
 	message: string;
@@ -508,6 +523,30 @@ export class PiSyncCommands {
 		message: string,
 	): void {
 		onProgress?.(phase, message);
+	}
+
+	/** Manage lock ownership for public operations without changing phase semantics. */
+	private async withCommandLock<T>(
+		operation: string,
+		onBusy: () => T,
+		run: () => Promise<T>,
+	): Promise<T> {
+		if (this.orchestrationLockHeld) return run();
+		if (!(await this.lock.acquire(operation, 5000))) return onBusy();
+		try {
+			return await run();
+		} finally {
+			await this.lock.release();
+		}
+	}
+
+	private busyCommandResult(): CommandResult {
+		return {
+			ok: false,
+			code: "partial_failure",
+			message: "Another sync operation is in progress.",
+			reload: false,
+		};
 	}
 
 	private async recoverPendingInternal(
@@ -918,6 +957,54 @@ export class PiSyncCommands {
 	 * branch. Publish that commit on the device branch, then restore the shared
 	 * branch to origin so the user can merge the remote device branch explicitly.
 	 */
+	private async coordinateDeviceBranchConflict(
+		repoPath: string,
+		config: PiSyncConfig,
+		state: SyncState,
+		fallbackPaths?: SyncConflictPath[],
+	): Promise<ConflictCoordinationResult> {
+		const preservation = await this.preserveConflictOnDeviceBranch(
+			repoPath,
+			config,
+			state,
+		);
+		if (preservation.fastForwarded) {
+			return {
+				kind: "resolved",
+				message: this.formatFastForwardedConflictMessage(config),
+			};
+		}
+		if (
+			await this.mergeDeviceBranchIntoShared(
+				repoPath,
+				config,
+				preservation.branch,
+			)
+		) {
+			return {
+				kind: "resolved",
+				message: this.formatMergedConflictMessage(config),
+			};
+		}
+		const conflict = await this.createSyncConflictRequest(
+			repoPath,
+			config,
+			preservation.branch,
+			preservation.paths.length > 0
+				? preservation.paths
+				: (fallbackPaths ?? []),
+		);
+		return {
+			kind: "needs_user",
+			conflict,
+			message: this.formatManualMergeMessage(
+				repoPath,
+				config,
+				preservation.branch,
+			),
+		};
+	}
+
 	private async preserveRebaseConflictOnDeviceBranch(
 		repoPath: string,
 		config: PiSyncConfig,
@@ -1036,41 +1123,26 @@ export class PiSyncCommands {
 		const config = await loadPiSyncConfig(rp);
 		const state = await loadState(this.agentDir);
 
-		const acquired =
-			this.orchestrationLockHeld || (await this.lock.acquire("apply", 5000));
-		if (!acquired) {
-			return {
-				ok: false,
-				code: "partial_failure",
-				message: "Another sync operation is in progress.",
-				reload: false,
-			};
-		}
-
-		try {
-			try {
-				await ensureConfiguredBranch(rp, config.branch);
-			} catch (error) {
-				return {
-					ok: false,
-					code: "blocked_conflict",
-					message:
-						error instanceof Error
-							? error.message
-							: "Configured branch check failed.",
-					reload: false,
-				};
-			}
-			return await this.applyCurrent(
-				rp,
-				config,
-				state,
-				"apply",
-				packageApproval,
-			);
-		} finally {
-			if (!this.orchestrationLockHeld) await this.lock.release();
-		}
+		return this.withCommandLock<CommandResult>(
+			"apply",
+			() => this.busyCommandResult(),
+			async () => {
+				try {
+					await ensureConfiguredBranch(rp, config.branch);
+				} catch (error) {
+					return {
+						ok: false,
+						code: "blocked_conflict",
+						message:
+							error instanceof Error
+								? error.message
+								: "Configured branch check failed.",
+						reload: false,
+					};
+				}
+				return this.applyCurrent(rp, config, state, "apply", packageApproval);
+			},
+		);
 	}
 
 	// ========== pull ==========
@@ -1098,252 +1170,195 @@ export class PiSyncCommands {
 		};
 		const pullTimeoutSeconds = config.pullTimeoutMs / 1000;
 
-		const acquired =
-			this.orchestrationLockHeld || (await this.lock.acquire("pull", 5000));
-		if (!acquired) {
-			return {
-				ok: false,
-				code: "partial_failure",
-				message: "Another sync operation is in progress.",
-				reload: false,
-			};
-		}
-
-		try {
-			// 1. 检查 repo 状态。目标分支已在本地时立即尝试切换；仅在
-			// 本地分支不存在时先 fetch，以便建立 origin/<branch> tracking branch。
-			reportProgress("Inspecting repository state...");
-			let status = await gitStatus(rp);
-			let switchedBranch = false;
-			if (status.branch !== config.branch) {
-				try {
-					const localBranch = await gitProbe(rp, [
-						"show-ref",
-						"--verify",
-						`refs/heads/${config.branch}`,
-					]);
-					if (!localBranch.ok) {
-						const command = "git fetch origin";
-						reportProgress(
-							`Running: ${command} (timeout: ${pullTimeoutSeconds}s)...`,
-						);
-						reportGitStart(command);
-						await gitFetch(rp, gitOptions);
-					}
-					reportProgress(`Switching to branch ${config.branch}...`);
-					switchedBranch = await ensureConfiguredBranch(rp, config.branch);
-					status = await gitStatus(rp);
-				} catch (error) {
-					return {
-						ok: false,
-						code: "blocked_conflict",
-						message:
-							error instanceof Error
-								? error.message
-								: "Configured branch check failed.",
-						reload: false,
-					};
-				}
-			}
-
-			if (status.isRebasing || status.isMerging) {
-				return {
-					ok: false,
-					code: "blocked_conflict",
-					message:
-						"Repository is in rebase/merge state. Resolve conflicts first.",
-					reload: false,
-				};
-			}
-
-			let committedRepositoryChanges = false;
-			if (status.hasUncommittedChanges) {
-				try {
-					reportProgress(
-						"Running: git commit -m pi-sync: preserve repository changes before pull...",
-					);
-					await gitCommit(
-						rp,
-						"pi-sync: preserve repository changes before pull",
-					);
-					committedRepositoryChanges = true;
-					status = await gitStatus(rp);
-				} catch (error) {
-					return {
-						ok: false,
-						code: "git_failed",
-						message: `Could not commit repository changes before pull: ${error instanceof Error ? error.message : "Unknown error"}`,
-						reload: false,
-					};
-				}
-			}
-
-			// 2. Capture and commit agent-only changes before pulling so a pull does
-			// not fail merely because the current device has unsynced configuration.
-			reportProgress("Comparing local and remote changes...");
-			const inventory = await compareFiles(this.agentDir, rp, config, state);
-			// Equal local/remote content is safe to adopt as the baseline before
-			// fetching. The explicit hash check also migrates legacy settings state
-			// from raw-byte hashes to the portable canonical representation.
-			let convergedBaselineChanged = false;
-			for (const comparison of inventory.comparisons) {
-				if (
-					comparison.local &&
-					comparison.remote &&
-					comparison.local.sha256 === comparison.remote.sha256 &&
-					state.files[comparison.relativePath]?.sha256 !==
-						comparison.remote.sha256
-				) {
-					state.files[comparison.relativePath] = {
-						sha256: comparison.remote.sha256,
-						mode: comparison.remote.mode,
-					};
-					convergedBaselineChanged = true;
-				}
-			}
-			if (convergedBaselineChanged) {
-				await saveState(this.agentDir, state);
-			}
-			const hasRemoteChanges = inventory.comparisons.some((comparison) =>
-				[
-					"remote_only",
-					"remote_created",
-					"remote_deleted",
-					"local_deleted_remote_modified",
-					"converged",
-				].includes(comparison.changeType),
-			);
-			let capturedLocalChanges = committedRepositoryChanges;
-			if (hasLocalChanges(inventory.comparisons)) {
-				reportProgress("Capturing local changes before pull...");
-				const capture = await this.captureWithScaffoldCalibration(
-					rp,
-					config,
-					state,
-					this.shouldRefreshLocalCapture(status, state),
-				);
-				if (capture.hasConflicts) {
+		return this.withCommandLock<CommandResult>(
+			"pull",
+			() => this.busyCommandResult(),
+			async () => {
+				// 1. 检查 repo 状态。目标分支已在本地时立即尝试切换；仅在
+				// 本地分支不存在时先 fetch，以便建立 origin/<branch> tracking branch。
+				reportProgress("Inspecting repository state...");
+				let status = await gitStatus(rp);
+				let switchedBranch = false;
+				if (status.branch !== config.branch) {
 					try {
-						const preservation = await this.preserveConflictOnDeviceBranch(
-							rp,
-							config,
-							state,
-						);
-						if (preservation.fastForwarded) {
-							const applyResult = await this.applyCurrent(
-								rp,
-								config,
-								state,
-								"pull",
-								packageApproval,
+						const localBranch = await gitProbe(rp, [
+							"show-ref",
+							"--verify",
+							`refs/heads/${config.branch}`,
+						]);
+						if (!localBranch.ok) {
+							const command = "git fetch origin";
+							reportProgress(
+								`Running: ${command} (timeout: ${pullTimeoutSeconds}s)...`,
 							);
-							return {
-								...applyResult,
-								message: `${this.formatFastForwardedConflictMessage(config)}\n${applyResult.message}`,
-							};
+							reportGitStart(command);
+							await gitFetch(rp, gitOptions);
 						}
-						if (
-							await this.mergeDeviceBranchIntoShared(
-								rp,
-								config,
-								preservation.branch,
-							)
-						) {
-							const applyResult = await this.applyCurrent(
-								rp,
-								config,
-								state,
-								"pull",
-								packageApproval,
-							);
-							return {
-								...applyResult,
-								message: `${this.formatMergedConflictMessage(config)}\n${applyResult.message}`,
-							};
-						}
-						const conflict = await this.createSyncConflictRequest(
-							rp,
-							config,
-							preservation.branch,
-							preservation.paths,
-						);
-						return {
-							ok: false,
-							code: "blocked_conflict",
-							message: this.formatManualMergeMessage(
-								rp,
-								config,
-								preservation.branch,
-							),
-							reload: false,
-							details: { conflict },
-						};
+						reportProgress(`Switching to branch ${config.branch}...`);
+						switchedBranch = await ensureConfiguredBranch(rp, config.branch);
+						status = await gitStatus(rp);
 					} catch (error) {
 						return {
 							ok: false,
-							code: "git_failed",
-							message: `Could not preserve current-device conflict changes: ${error instanceof Error ? error.message : "Unknown error"}`,
+							code: "blocked_conflict",
+							message:
+								error instanceof Error
+									? error.message
+									: "Configured branch check failed.",
 							reload: false,
 						};
 					}
 				}
-				if (capture.errors.length > 0 || capture.denied.length > 0) {
+
+				const worktree = await preparePullWorktree(rp, status, reportProgress);
+				if (worktree.kind === "blocked") {
 					return {
 						ok: false,
 						code: "blocked_conflict",
-						message: `Pull blocked while capturing local changes.\n${[
-							...capture.errors.map(
-								(error) => `${error.file}: ${error.message}`,
-							),
-							...capture.denied.map((file) => `${file}: denied by sync policy`),
-						].join("\n")}`,
+						message: worktree.message,
 						reload: false,
 					};
 				}
-				try {
-					reportProgress(
-						"Running: git commit -m pi-sync: capture local changes before pull...",
-					);
-					await gitCommit(rp, "pi-sync: capture local changes before pull");
-					capturedLocalChanges = true;
-				} catch (error) {
+				if (worktree.kind === "failed") {
 					return {
 						ok: false,
 						code: "git_failed",
-						message: `Could not commit local changes before pull: ${error instanceof Error ? error.message : "Unknown error"}`,
+						message: worktree.message,
 						reload: false,
 					};
 				}
-			}
+				status = worktree.status;
+				const committedRepositoryChanges = worktree.committedRepositoryChanges;
 
-			// 3. Fetch
-			try {
-				const command = "git fetch origin";
-				reportProgress(
-					`Running: ${command} (timeout: ${pullTimeoutSeconds}s)...`,
+				// 2. Capture and commit agent-only changes before pulling so a pull does
+				// not fail merely because the current device has unsynced configuration.
+				reportProgress("Comparing local and remote changes...");
+				const inventory = await compareFiles(this.agentDir, rp, config, state);
+				// Equal local/remote content is safe to adopt as the baseline before
+				// fetching. The explicit hash check also migrates legacy settings state
+				// from raw-byte hashes to the portable canonical representation.
+				let convergedBaselineChanged = false;
+				for (const comparison of inventory.comparisons) {
+					if (
+						comparison.local &&
+						comparison.remote &&
+						comparison.local.sha256 === comparison.remote.sha256 &&
+						state.files[comparison.relativePath]?.sha256 !==
+							comparison.remote.sha256
+					) {
+						state.files[comparison.relativePath] = {
+							sha256: comparison.remote.sha256,
+							mode: comparison.remote.mode,
+						};
+						convergedBaselineChanged = true;
+					}
+				}
+				if (convergedBaselineChanged) {
+					await saveState(this.agentDir, state);
+				}
+				const hasRemoteChanges = inventory.comparisons.some((comparison) =>
+					[
+						"remote_only",
+						"remote_created",
+						"remote_deleted",
+						"local_deleted_remote_modified",
+						"converged",
+					].includes(comparison.changeType),
 				);
-				reportGitStart(command);
-				await gitFetch(rp, gitOptions);
-			} catch (err) {
-				return {
-					ok: false,
-					code: "git_failed",
-					message: `git fetch failed: ${err instanceof Error ? err.message : "Unknown"}`,
-					reload: false,
-				};
-			}
-
-			// 4. A local repository or agent capture creates a commit, so rebase it
-			// onto the fetched remote branch instead of fast-forwarding only.
-			if (capturedLocalChanges) {
-				try {
-					const command = `git rebase origin/${config.branch}`;
-					reportProgress(
-						`Running: ${command} (timeout: ${pullTimeoutSeconds}s)...`,
+				let capturedLocalChanges = committedRepositoryChanges;
+				if (hasLocalChanges(inventory.comparisons)) {
+					reportProgress("Capturing local changes before pull...");
+					const capture = await this.captureWithScaffoldCalibration(
+						rp,
+						config,
+						state,
+						this.shouldRefreshLocalCapture(status, state),
 					);
-					reportGitStart(command);
-					const rebase = await gitRebase(rp, config.branch, gitOptions);
-					if (rebase.conflict) {
+					if (capture.hasConflicts) {
+						try {
+							const coordination = await this.coordinateDeviceBranchConflict(
+								rp,
+								config,
+								state,
+							);
+							if (coordination.kind === "resolved") {
+								const applyResult = await this.applyCurrent(
+									rp,
+									config,
+									state,
+									"pull",
+									packageApproval,
+								);
+								return {
+									...applyResult,
+									message: `${coordination.message}\n${applyResult.message}`,
+								};
+							}
+							return {
+								ok: false,
+								code: "blocked_conflict",
+								message: coordination.message,
+								reload: false,
+								details: { conflict: coordination.conflict },
+							};
+						} catch (error) {
+							return {
+								ok: false,
+								code: "git_failed",
+								message: `Could not preserve current-device conflict changes: ${error instanceof Error ? error.message : "Unknown error"}`,
+								reload: false,
+							};
+						}
+					}
+					if (capture.errors.length > 0 || capture.denied.length > 0) {
+						return {
+							ok: false,
+							code: "blocked_conflict",
+							message: `Pull blocked while capturing local changes.\n${[
+								...capture.errors.map(
+									(error) => `${error.file}: ${error.message}`,
+								),
+								...capture.denied.map(
+									(file) => `${file}: denied by sync policy`,
+								),
+							].join("\n")}`,
+							reload: false,
+						};
+					}
+					const captureCommit = await commitCapturedChangesBeforePull(
+						rp,
+						reportProgress,
+					);
+					if (captureCommit.kind === "failed") {
+						return {
+							ok: false,
+							code: "git_failed",
+							message: captureCommit.message,
+							reload: false,
+						};
+					}
+					capturedLocalChanges = true;
+				}
+
+				const integration = await integratePulledHead({
+					repoPath: rp,
+					branch: config.branch,
+					timeoutMs: config.pullTimeoutMs,
+					capturedLocalChanges,
+					signal: executionOptions.signal,
+					onProgress: reportProgress,
+					onGitCommandStart: reportGitStart,
+				});
+				if (integration.kind === "failed") {
+					return {
+						ok: false,
+						code: "git_failed",
+						message: integration.message,
+						reload: false,
+					};
+				}
+				if (integration.kind === "rebase_conflict") {
+					try {
 						const paths = conflictPathsFrom(
 							(await listUnmergedPaths(rp)).map((relativePath) => ({
 								relativePath:
@@ -1369,76 +1384,53 @@ export class PiSyncCommands {
 							reload: false,
 							details: { conflict },
 						};
+					} catch (error) {
+						return {
+							ok: false,
+							code: "git_failed",
+							message: `Rebase failed after committing local changes: ${error instanceof Error ? error.message : "Unknown error"}`,
+							reload: false,
+						};
 					}
-				} catch (error) {
-					return {
-						ok: false,
-						code: "git_failed",
-						message: `Rebase failed after committing local changes: ${error instanceof Error ? error.message : "Unknown error"}`,
-						reload: false,
-					};
 				}
-				reportProgress("Applying pulled changes...");
-				return await this.applyCurrent(
-					rp,
-					config,
-					await loadState(this.agentDir),
-					"pull",
-					packageApproval,
-				);
-			}
-
-			// 5. Fast-forward from the remote-tracking ref updated by step 3.
-			// Do not use git pull here: it would perform a second network fetch.
-			let pulled: boolean;
-			try {
-				const command = `git merge --ff-only origin/${config.branch}`;
-				reportProgress(
-					`Running: ${command} (timeout: ${pullTimeoutSeconds}s)...`,
-				);
-				reportGitStart(command);
-				({ pulled } = await gitFastForward(rp, config.branch, gitOptions));
-			} catch (error) {
-				return {
-					ok: false,
-					code: "git_failed",
-					message: `git fast-forward failed: ${error instanceof Error ? error.message : "Unknown error"}`,
-					reload: false,
-				};
-			}
-			const newState = await loadState(this.agentDir);
-			if (!pulled) {
-				// A previous pull may have fast-forwarded before package approval was
-				// granted. Re-run apply so approval can complete without another pull.
-				if (packageApproval || switchedBranch || hasRemoteChanges) {
-					return await this.applyCurrent(
+				if (integration.kind === "rebased") {
+					reportProgress("Applying pulled changes...");
+					return this.applyCurrent(
 						rp,
 						config,
-						newState,
+						await loadState(this.agentDir),
 						"pull",
 						packageApproval,
 					);
 				}
-				return {
-					ok: true,
-					code: "noop",
-					message: "pi-git-sync: Already up to date.",
-					reload: false,
-				};
-			}
 
-			// 6. Apply
-			reportProgress("Applying pulled changes...");
-			return await this.applyCurrent(
-				rp,
-				config,
-				newState,
-				"pull",
-				packageApproval,
-			);
-		} finally {
-			if (!this.orchestrationLockHeld) await this.lock.release();
-		}
+				const { pulled } = integration;
+				const newState = await loadState(this.agentDir);
+				if (!pulled) {
+					// A previous pull may have fast-forwarded before package approval was
+					// granted. Re-run apply so approval can complete without another pull.
+					if (packageApproval || switchedBranch || hasRemoteChanges) {
+						return this.applyCurrent(
+							rp,
+							config,
+							newState,
+							"pull",
+							packageApproval,
+						);
+					}
+					return {
+						ok: true,
+						code: "noop",
+						message: "pi-git-sync: Already up to date.",
+						reload: false,
+					};
+				}
+
+				// 6. Apply
+				reportProgress("Applying pulled changes...");
+				return this.applyCurrent(rp, config, newState, "pull", packageApproval);
+			},
+		);
 	}
 
 	// ========== push ==========
@@ -1460,11 +1452,9 @@ export class PiSyncCommands {
 			conflicts: [],
 		};
 
-		const acquired =
-			this.orchestrationLockHeld ||
-			(await this.lock.acquire("push-prepare", 5000));
-		if (!acquired) {
-			return {
+		return this.withCommandLock<PushPreparation>(
+			"push-prepare",
+			() => ({
 				kind: "blocked",
 				capture: emptyCapture,
 				changedFiles: [],
@@ -1474,111 +1464,118 @@ export class PiSyncCommands {
 				repoPath: rp,
 				branch: config.branch,
 				message: "Another sync operation is in progress.",
-			};
-		}
-
-		try {
-			let statusBefore = await gitStatus(rp);
-			if (
-				statusBefore.branch !== config.branch &&
-				!statusBefore.isRebasing &&
-				!statusBefore.isMerging &&
-				!statusBefore.hasUncommittedChanges
-			) {
-				try {
-					await gitFetch(rp);
-				} catch {
-					// ensureConfiguredBranch below reports the actionable branch error.
-				}
-			}
-			try {
-				await ensureConfiguredBranch(rp, config.branch);
-				statusBefore = await gitStatus(rp);
-			} catch (error) {
-				return {
-					kind: "blocked",
-					capture: emptyCapture,
-					changedFiles: [],
-					diff: "",
-					repoHead: statusBefore.commit,
-					worktreeFingerprint: "",
-					repoPath: rp,
-					branch: config.branch,
-					message:
-						error instanceof Error
-							? error.message
-							: "Configured branch check failed.",
-				};
-			}
-			if (
-				statusBefore.isRebasing ||
-				statusBefore.isMerging ||
-				statusBefore.hasConflicts
-			) {
-				return {
-					kind: "blocked",
-					capture: emptyCapture,
-					changedFiles: [],
-					diff: "",
-					repoHead: statusBefore.commit,
-					worktreeFingerprint: "",
-					repoPath: rp,
-					branch: config.branch,
-					message:
-						"Repository is in conflict/resolution state. Resolve it before preparing push.",
-				};
-			}
-
-			const capture = await this.captureWithScaffoldCalibration(
-				rp,
-				config,
-				state,
-				this.shouldRefreshLocalCapture(statusBefore, state),
-			);
-			if (capture.hasConflicts) {
-				try {
-					const preservation = await this.preserveConflictOnDeviceBranch(
-						rp,
-						config,
-						state,
-					);
-					let resolutionMessage: string | null = null;
-					if (preservation.fastForwarded) {
-						resolutionMessage = this.formatFastForwardedConflictMessage(config);
-					} else if (
-						await this.mergeDeviceBranchIntoShared(
-							rp,
-							config,
-							preservation.branch,
-						)
-					) {
-						resolutionMessage = this.formatMergedConflictMessage(config);
+			}),
+			async () => {
+				let statusBefore = await gitStatus(rp);
+				if (
+					statusBefore.branch !== config.branch &&
+					!statusBefore.isRebasing &&
+					!statusBefore.isMerging &&
+					!statusBefore.hasUncommittedChanges
+				) {
+					try {
+						await gitFetch(rp);
+					} catch {
+						// ensureConfiguredBranch below reports the actionable branch error.
 					}
-					if (resolutionMessage) {
-						const applyResult = await this.applyCurrent(
+				}
+				try {
+					await ensureConfiguredBranch(rp, config.branch);
+					statusBefore = await gitStatus(rp);
+				} catch (error) {
+					return {
+						kind: "blocked",
+						capture: emptyCapture,
+						changedFiles: [],
+						diff: "",
+						repoHead: statusBefore.commit,
+						worktreeFingerprint: "",
+						repoPath: rp,
+						branch: config.branch,
+						message:
+							error instanceof Error
+								? error.message
+								: "Configured branch check failed.",
+					};
+				}
+				if (
+					statusBefore.isRebasing ||
+					statusBefore.isMerging ||
+					statusBefore.hasConflicts
+				) {
+					return {
+						kind: "blocked",
+						capture: emptyCapture,
+						changedFiles: [],
+						diff: "",
+						repoHead: statusBefore.commit,
+						worktreeFingerprint: "",
+						repoPath: rp,
+						branch: config.branch,
+						message:
+							"Repository is in conflict/resolution state. Resolve it before preparing push.",
+					};
+				}
+
+				const capture = await this.captureWithScaffoldCalibration(
+					rp,
+					config,
+					state,
+					this.shouldRefreshLocalCapture(statusBefore, state),
+				);
+				if (capture.hasConflicts) {
+					try {
+						const coordination = await this.coordinateDeviceBranchConflict(
 							rp,
 							config,
 							state,
-							"push",
 						);
+						if (coordination.kind === "resolved") {
+							const applyResult = await this.applyCurrent(
+								rp,
+								config,
+								state,
+								"push",
+							);
+							return {
+								kind: applyResult.ok ? "noop" : "blocked",
+								capture,
+								changedFiles: [],
+								diff: "",
+								repoHead: await getHeadCommit(rp),
+								worktreeFingerprint: "",
+								repoPath: rp,
+								branch: config.branch,
+								message: `${coordination.message}\n${applyResult.message}`,
+							};
+						}
 						return {
-							kind: applyResult.ok ? "noop" : "blocked",
+							kind: "blocked",
 							capture,
 							changedFiles: [],
 							diff: "",
-							repoHead: await getHeadCommit(rp),
+							repoHead: statusBefore.commit,
 							worktreeFingerprint: "",
 							repoPath: rp,
 							branch: config.branch,
-							message: `${resolutionMessage}\n${applyResult.message}`,
+							message: coordination.message,
+							conflict: coordination.conflict,
+						};
+					} catch (error) {
+						return {
+							kind: "blocked",
+							capture,
+							changedFiles: [],
+							diff: "",
+							repoHead: statusBefore.commit,
+							worktreeFingerprint: "",
+							repoPath: rp,
+							branch: config.branch,
+							message: `Could not create a current-device conflict branch: ${error instanceof Error ? error.message : "Unknown error"}`,
 						};
 					}
-					const conflict = await this.createSyncConflictRequest(
-						rp,
-						config,
-						preservation.branch,
-						preservation.paths,
-					);
+				}
+				if (capture.errors.length > 0) {
 					return {
 						kind: "blocked",
 						capture,
@@ -1588,69 +1585,119 @@ export class PiSyncCommands {
 						worktreeFingerprint: "",
 						repoPath: rp,
 						branch: config.branch,
-						message: this.formatManualMergeMessage(
+						message: `Push blocked while capturing files.\n${capture.errors.map((e) => `${e.file}: ${e.message}`).join("\n")}`,
+					};
+				}
+
+				const status = await gitStatus(rp);
+				const changedFiles = this.normalizeRepoChangedFiles(
+					status.changedFiles,
+					config,
+				);
+				if (!status.hasUncommittedChanges) {
+					const head = await getHeadCommit(rp);
+					return {
+						kind: "noop",
+						capture,
+						changedFiles: [],
+						diff: "",
+						repoHead: head,
+						worktreeFingerprint: await this.computePushFingerprint(
 							rp,
 							config,
-							preservation.branch,
+							state,
 						),
-						conflict,
+						repoPath: rp,
+						branch: config.branch,
+						message: "No changes to push.",
 					};
+				}
+
+				const validation = await validateFiles(rp, config, changedFiles);
+				if (validation.blocked) {
+					return {
+						kind: "blocked",
+						capture,
+						changedFiles,
+						diff: await gitDiff(rp),
+						repoHead: status.commit,
+						worktreeFingerprint: await this.computePushFingerprint(
+							rp,
+							config,
+							state,
+						),
+						repoPath: rp,
+						branch: config.branch,
+						message: `Push blocked: validation errors.\n${formatValidationErrors(validation.errors)}`,
+					};
+				}
+
+				if (config.security.scanSecretsBeforePush) {
+					const secretFindings = await this.scanForSecrets(rp, config);
+					if (secretFindings.length > 0) {
+						return {
+							kind: "blocked",
+							capture,
+							changedFiles,
+							diff: await gitDiff(rp),
+							repoHead: status.commit,
+							worktreeFingerprint: await this.computePushFingerprint(
+								rp,
+								config,
+								state,
+							),
+							repoPath: rp,
+							branch: config.branch,
+							message: `Push blocked: potential secrets detected.\n${formatSecretsFindings(secretFindings)}`,
+						};
+					}
+				}
+
+				// Package preparation is read-only here. Installation belongs to the
+				// apply phase after settings have been materialized.
+				try {
+					const packagePlan = await preparePackagePlan(
+						rp,
+						this.agentDir,
+						config,
+					);
+					if (packagePlan.approvalRequired.length > 0) {
+						return {
+							kind: "blocked",
+							capture,
+							changedFiles,
+							diff: await gitDiff(rp),
+							repoHead: status.commit,
+							worktreeFingerprint: await this.computePushFingerprint(
+								rp,
+								config,
+								state,
+							),
+							repoPath: rp,
+							branch: config.branch,
+							message: `Package approval required before push: ${packagePlan.approvalRequired.join(", ")}`,
+						};
+					}
 				} catch (error) {
 					return {
 						kind: "blocked",
 						capture,
-						changedFiles: [],
-						diff: "",
-						repoHead: statusBefore.commit,
-						worktreeFingerprint: "",
+						changedFiles,
+						diff: await gitDiff(rp),
+						repoHead: status.commit,
+						worktreeFingerprint: await this.computePushFingerprint(
+							rp,
+							config,
+							state,
+						),
 						repoPath: rp,
 						branch: config.branch,
-						message: `Could not create a current-device conflict branch: ${error instanceof Error ? error.message : "Unknown error"}`,
+						message: `Package validation failed: ${error instanceof Error ? error.message : "Unknown"}`,
 					};
 				}
-			}
-			if (capture.errors.length > 0) {
-				return {
-					kind: "blocked",
-					capture,
-					changedFiles: [],
-					diff: "",
-					repoHead: statusBefore.commit,
-					worktreeFingerprint: "",
-					repoPath: rp,
-					branch: config.branch,
-					message: `Push blocked while capturing files.\n${capture.errors.map((e) => `${e.file}: ${e.message}`).join("\n")}`,
-				};
-			}
 
-			const status = await gitStatus(rp);
-			const changedFiles = this.normalizeRepoChangedFiles(
-				status.changedFiles,
-				config,
-			);
-			if (!status.hasUncommittedChanges) {
-				const head = await getHeadCommit(rp);
 				return {
-					kind: "noop",
-					capture,
-					changedFiles: [],
-					diff: "",
-					repoHead: head,
-					worktreeFingerprint: await this.computePushFingerprint(
-						rp,
-						config,
-						state,
-					),
-					repoPath: rp,
-					branch: config.branch,
-					message: "No changes to push.",
-				};
-			}
-
-			const validation = await validateFiles(rp, config, changedFiles);
-			if (validation.blocked) {
-				return {
-					kind: "blocked",
+					kind: "ready",
 					capture,
 					changedFiles,
 					diff: await gitDiff(rp),
@@ -1662,88 +1709,10 @@ export class PiSyncCommands {
 					),
 					repoPath: rp,
 					branch: config.branch,
-					message: `Push blocked: validation errors.\n${formatValidationErrors(validation.errors)}`,
+					message: `Push ready: ${changedFiles.length} changed file(s).`,
 				};
-			}
-
-			if (config.security.scanSecretsBeforePush) {
-				const secretFindings = await this.scanForSecrets(rp, config);
-				if (secretFindings.length > 0) {
-					return {
-						kind: "blocked",
-						capture,
-						changedFiles,
-						diff: await gitDiff(rp),
-						repoHead: status.commit,
-						worktreeFingerprint: await this.computePushFingerprint(
-							rp,
-							config,
-							state,
-						),
-						repoPath: rp,
-						branch: config.branch,
-						message: `Push blocked: potential secrets detected.\n${formatSecretsFindings(secretFindings)}`,
-					};
-				}
-			}
-
-			// Package preparation is read-only here. Installation belongs to the
-			// apply phase after settings have been materialized.
-			try {
-				const packagePlan = await preparePackagePlan(rp, this.agentDir, config);
-				if (packagePlan.approvalRequired.length > 0) {
-					return {
-						kind: "blocked",
-						capture,
-						changedFiles,
-						diff: await gitDiff(rp),
-						repoHead: status.commit,
-						worktreeFingerprint: await this.computePushFingerprint(
-							rp,
-							config,
-							state,
-						),
-						repoPath: rp,
-						branch: config.branch,
-						message: `Package approval required before push: ${packagePlan.approvalRequired.join(", ")}`,
-					};
-				}
-			} catch (error) {
-				return {
-					kind: "blocked",
-					capture,
-					changedFiles,
-					diff: await gitDiff(rp),
-					repoHead: status.commit,
-					worktreeFingerprint: await this.computePushFingerprint(
-						rp,
-						config,
-						state,
-					),
-					repoPath: rp,
-					branch: config.branch,
-					message: `Package validation failed: ${error instanceof Error ? error.message : "Unknown"}`,
-				};
-			}
-
-			return {
-				kind: "ready",
-				capture,
-				changedFiles,
-				diff: await gitDiff(rp),
-				repoHead: status.commit,
-				worktreeFingerprint: await this.computePushFingerprint(
-					rp,
-					config,
-					state,
-				),
-				repoPath: rp,
-				branch: config.branch,
-				message: `Push ready: ${changedFiles.length} changed file(s).`,
-			};
-		} finally {
-			if (!this.orchestrationLockHeld) await this.lock.release();
-		}
+			},
+		);
 	}
 
 	/** 执行已确认的 preparation，并在执行前重新校验 HEAD/worktree 指纹。 */
@@ -1753,179 +1722,161 @@ export class PiSyncCommands {
 	): Promise<CommandResult> {
 		if (preparation.kind !== "ready") return resultFromPreparation(preparation);
 
-		const acquired =
-			this.orchestrationLockHeld || (await this.lock.acquire("push", 5000));
-		if (!acquired) {
-			return {
-				ok: false,
-				code: "partial_failure",
-				message: "Another sync operation is in progress.",
-				reload: false,
-			};
-		}
-
-		try {
-			const rp = preparation.repoPath;
-			const config = await loadPiSyncConfig(rp);
-			const state = await loadState(this.agentDir);
-			try {
-				await ensureConfiguredBranch(rp, config.branch);
-			} catch (error) {
-				return {
-					ok: false,
-					code: "blocked_conflict",
-					message:
-						error instanceof Error
-							? error.message
-							: "Configured branch check failed.",
-					reload: false,
-				};
-			}
-			const currentHead = await getHeadCommit(rp);
-			const currentFingerprint = await this.computePushFingerprint(
-				rp,
-				config,
-				state,
-			);
-			if (
-				currentHead !== preparation.repoHead ||
-				currentFingerprint !== preparation.worktreeFingerprint
-			) {
-				return {
-					ok: false,
-					code: "blocked_conflict",
-					message:
-						"Push preparation is stale: the repository or agent changed after confirmation. Prepare push again.",
-					reload: false,
-				};
-			}
-
-			await gitCommit(rp, message ?? "pi-sync: update configuration");
-
-			try {
-				await gitFetch(rp);
-			} catch (err) {
-				return {
-					ok: false,
-					code: "git_failed",
-					message: `git fetch failed after local commit: ${err instanceof Error ? err.message : "Unknown"}. Local commit is preserved.`,
-					reload: false,
-				};
-			}
-
-			const remoteRefExists = await gitRemoteRefExists(rp, preparation.branch);
-			if (remoteRefExists) {
+		return this.withCommandLock<CommandResult>(
+			"push",
+			() => this.busyCommandResult(),
+			async () => {
+				const rp = preparation.repoPath;
+				const config = await loadPiSyncConfig(rp);
+				const state = await loadState(this.agentDir);
 				try {
-					const rebaseResult = await gitRebase(rp, preparation.branch);
-					if (rebaseResult.conflict) {
-						try {
-							const paths = conflictPathsFrom(
-								(await listUnmergedPaths(rp)).map((relativePath) => ({
-									relativePath:
-										this.normalizeRepoChangedFiles([relativePath], config)[0] ??
-										relativePath,
-									changeType: "git_conflict",
-								})),
-							);
-							const branch = await this.preserveRebaseConflictOnDeviceBranch(
-								rp,
-								config,
-							);
-							if (
-								!(await this.mergeDeviceBranchIntoShared(rp, config, branch))
-							) {
-								const conflict = await this.createSyncConflictRequest(
-									rp,
-									config,
-									branch,
-									paths,
-								);
-								return {
-									ok: false,
-									code: "blocked_conflict",
-									message: this.formatManualMergeMessage(rp, config, branch),
-									reload: false,
-									details: { conflict },
-								};
-							}
+					await ensureConfiguredBranch(rp, config.branch);
+				} catch (error) {
+					return {
+						ok: false,
+						code: "blocked_conflict",
+						message:
+							error instanceof Error
+								? error.message
+								: "Configured branch check failed.",
+						reload: false,
+					};
+				}
+				const currentHead = await getHeadCommit(rp);
+				const currentFingerprint = await this.computePushFingerprint(
+					rp,
+					config,
+					state,
+				);
+				if (
+					currentHead !== preparation.repoHead ||
+					currentFingerprint !== preparation.worktreeFingerprint
+				) {
+					return {
+						ok: false,
+						code: "blocked_conflict",
+						message:
+							"Push preparation is stale: the repository or agent changed after confirmation. Prepare push again.",
+						reload: false,
+					};
+				}
 
-							const newState = await loadState(this.agentDir);
-							const applyResult = await this.applyCurrent(
+				await gitCommit(rp, message ?? "pi-sync: update configuration");
+
+				const integration = await integrateCommittedPush({
+					repoPath: rp,
+					branch: preparation.branch,
+				});
+				if (integration.kind === "failed") {
+					return {
+						ok: false,
+						code: "git_failed",
+						message: integration.message,
+						reload: false,
+					};
+				}
+				if (integration.kind === "rebase_conflict") {
+					try {
+						const paths = conflictPathsFrom(
+							(await listUnmergedPaths(rp)).map((relativePath) => ({
+								relativePath:
+									this.normalizeRepoChangedFiles([relativePath], config)[0] ??
+									relativePath,
+								changeType: "git_conflict",
+							})),
+						);
+						const branch = await this.preserveRebaseConflictOnDeviceBranch(
+							rp,
+							config,
+						);
+						if (!(await this.mergeDeviceBranchIntoShared(rp, config, branch))) {
+							const conflict = await this.createSyncConflictRequest(
 								rp,
 								config,
-								newState,
-								"push",
+								branch,
+								paths,
 							);
-							if (!applyResult.ok) {
-								return {
-									ok: false,
-									code: applyResult.code,
-									message:
-										"Push completed, but applying the synced configuration failed.\n" +
-										this.formatMergedConflictMessage(config) +
-										"\n" +
-										applyResult.message,
-									reload: false,
-								};
-							}
-							return {
-								ok: true,
-								code: "ok",
-								message: `Pushed successfully.\n${this.formatMergedConflictMessage(config)}\n${applyResult.message}`,
-								reload: applyResult.reload,
-							};
-						} catch (error) {
 							return {
 								ok: false,
-								code: "git_failed",
-								message: `Could not create or merge a current-device conflict branch: ${error instanceof Error ? error.message : "Unknown error"}`,
+								code: "blocked_conflict",
+								message: this.formatManualMergeMessage(rp, config, branch),
+								reload: false,
+								details: { conflict },
+							};
+						}
+
+						const newState = await loadState(this.agentDir);
+						const applyResult = await this.applyCurrent(
+							rp,
+							config,
+							newState,
+							"push",
+						);
+						if (!applyResult.ok) {
+							return {
+								ok: false,
+								code: applyResult.code,
+								message:
+									"Push completed, but applying the synced configuration failed.\n" +
+									this.formatMergedConflictMessage(config) +
+									"\n" +
+									applyResult.message,
 								reload: false,
 							};
 						}
+						return {
+							ok: true,
+							code: "ok",
+							message: `Pushed successfully.\n${this.formatMergedConflictMessage(config)}\n${applyResult.message}`,
+							reload: applyResult.reload,
+						};
+					} catch (error) {
+						return {
+							ok: false,
+							code: "git_failed",
+							message: `Could not create or merge a current-device conflict branch: ${error instanceof Error ? error.message : "Unknown error"}`,
+							reload: false,
+						};
 					}
+				}
+
+				try {
+					await this.pushMainAndDeviceBranches(rp, preparation.branch);
 				} catch (err) {
 					return {
 						ok: false,
 						code: "git_failed",
-						message: `Rebase failed: ${err instanceof Error ? err.message : "Unknown"}`,
+						message: `Push failed: ${err instanceof Error ? err.message : "Unknown"}\nLocal commits are preserved.`,
 						reload: false,
 					};
 				}
-			}
 
-			try {
-				await this.pushMainAndDeviceBranches(rp, preparation.branch);
-			} catch (err) {
+				const newState = await loadState(this.agentDir);
+				const applyResult = await this.applyCurrent(
+					rp,
+					config,
+					newState,
+					"push",
+				);
+				if (!applyResult.ok) {
+					return {
+						ok: false,
+						code: applyResult.code,
+						message:
+							"Push completed, but applying the synced configuration failed.\n" +
+							applyResult.message,
+						reload: false,
+					};
+				}
+
 				return {
-					ok: false,
-					code: "git_failed",
-					message: `Push failed: ${err instanceof Error ? err.message : "Unknown"}\nLocal commits are preserved.`,
-					reload: false,
+					ok: true,
+					code: "ok",
+					message: `Pushed successfully.\n${applyResult.message}`,
+					reload: applyResult.reload,
 				};
-			}
-
-			const newState = await loadState(this.agentDir);
-			const applyResult = await this.applyCurrent(rp, config, newState, "push");
-			if (!applyResult.ok) {
-				return {
-					ok: false,
-					code: applyResult.code,
-					message:
-						"Push completed, but applying the synced configuration failed.\n" +
-						applyResult.message,
-					reload: false,
-				};
-			}
-
-			return {
-				ok: true,
-				code: "ok",
-				message: `Pushed successfully.\n${applyResult.message}`,
-				reload: applyResult.reload,
-			};
-		} finally {
-			if (!this.orchestrationLockHeld) await this.lock.release();
-		}
+			},
+		);
 	}
 
 	async push(
@@ -2015,92 +1966,94 @@ export class PiSyncCommands {
 			};
 		}
 
-		const acquired =
-			this.orchestrationLockHeld ||
-			(await this.lock.acquire("push-continue", 5000));
-		if (!acquired) {
-			return {
+		return this.withCommandLock<{ message: string; reload: boolean }>(
+			"push-continue",
+			() => ({
 				message: "Another sync operation is in progress.",
 				reload: false,
-			};
-		}
-
-		try {
-			try {
-				await ensureConfiguredBranch(rp, config.branch);
-			} catch (error) {
-				return {
-					message:
-						error instanceof Error
-							? error.message
-							: "Configured branch check failed.",
-					reload: false,
-				};
-			}
-
-			// 1. 确认无 unmerged paths
-			if (await hasUnmergedPaths(rp)) {
-				return {
-					message:
-						"There are still unmerged paths. Resolve all conflicts and run git add + git rebase --continue first.",
-					reload: false,
-				};
-			}
-
-			// 2. 确认工作树干净
-			if (!(await isWorktreeClean(rp))) {
-				return {
-					message: "Worktree is not clean. Commit or stash changes first.",
-					reload: false,
-				};
-			}
-
-			// 3. 校验最终提交
-			await gitDiffRange(rp, `origin/${config.branch}`, "HEAD").catch(() => "");
-			const allRepoSyncFiles = await this.getRepoSyncFiles(rp, config);
-
-			const validation = await validateFiles(rp, config, allRepoSyncFiles);
-			if (validation.blocked) {
-				return {
-					message: `Validation errors after conflict resolution:\n${formatValidationErrors(validation.errors)}`,
-					reload: false,
-				};
-			}
-
-			// 4. Secret scan
-			if (config.security.scanSecretsBeforePush) {
-				const secretFindings = await this.scanForSecrets(rp, config);
-				if (secretFindings.length > 0) {
+			}),
+			async () => {
+				try {
+					await ensureConfiguredBranch(rp, config.branch);
+				} catch (error) {
 					return {
-						message: `Push blocked: potential secrets detected.\n${formatSecretsFindings(secretFindings)}`,
+						message:
+							error instanceof Error
+								? error.message
+								: "Configured branch check failed.",
 						reload: false,
 					};
 				}
-			}
 
-			// 5. Push the shared branch and the current-device snapshot.
-			try {
-				await this.pushMainAndDeviceBranches(rp, config.branch);
-			} catch (err) {
+				// 1. 确认无 unmerged paths
+				if (await hasUnmergedPaths(rp)) {
+					return {
+						message:
+							"There are still unmerged paths. Resolve all conflicts and run git add + git rebase --continue first.",
+						reload: false,
+					};
+				}
+
+				// 2. 确认工作树干净
+				if (!(await isWorktreeClean(rp))) {
+					return {
+						message: "Worktree is not clean. Commit or stash changes first.",
+						reload: false,
+					};
+				}
+
+				// 3. 校验最终提交
+				await gitDiffRange(rp, `origin/${config.branch}`, "HEAD").catch(
+					() => "",
+				);
+				const allRepoSyncFiles = await this.getRepoSyncFiles(rp, config);
+
+				const validation = await validateFiles(rp, config, allRepoSyncFiles);
+				if (validation.blocked) {
+					return {
+						message: `Validation errors after conflict resolution:\n${formatValidationErrors(validation.errors)}`,
+						reload: false,
+					};
+				}
+
+				// 4. Secret scan
+				if (config.security.scanSecretsBeforePush) {
+					const secretFindings = await this.scanForSecrets(rp, config);
+					if (secretFindings.length > 0) {
+						return {
+							message: `Push blocked: potential secrets detected.\n${formatSecretsFindings(secretFindings)}`,
+							reload: false,
+						};
+					}
+				}
+
+				// 5. Push the shared branch and the current-device snapshot.
+				try {
+					await this.pushMainAndDeviceBranches(rp, config.branch);
+				} catch (err) {
+					return {
+						message: `Push failed: ${err instanceof Error ? err.message : "Unknown"}`,
+						reload: false,
+					};
+				}
+
+				// 6. Apply + 更新状态
+				const newState = { ...state, pendingOperation: null };
+				await saveState(this.agentDir, newState);
+
+				const applyResult = await this.applyCurrent(
+					rp,
+					config,
+					newState,
+					"push",
+				);
+
 				return {
-					message: `Push failed: ${err instanceof Error ? err.message : "Unknown"}`,
-					reload: false,
+					message: `Push continued successfully.\n${applyResult.message}`,
+					reload: applyResult.reload,
 				};
-			}
-
-			// 6. Apply + 更新状态
-			const newState = { ...state, pendingOperation: null };
-			await saveState(this.agentDir, newState);
-
-			const applyResult = await this.applyCurrent(rp, config, newState, "push");
-
-			return {
-				message: `Push continued successfully.\n${applyResult.message}`,
-				reload: applyResult.reload,
-			};
-		} finally {
-			if (!this.orchestrationLockHeld) await this.lock.release();
-		}
+			},
+		);
 	}
 
 	// ========== init (统一入口) ==========
@@ -2138,7 +2091,7 @@ export class PiSyncCommands {
 		}
 
 		// 校验 URL 格式
-		if (!isValidGitUrl(gitUrl)) {
+		if (!isValidSetupGitUrl(gitUrl)) {
 			return normalizeInitResult({
 				message:
 					`Invalid Git URL: ${gitUrl}\n` +
@@ -2253,301 +2206,23 @@ export class PiSyncCommands {
 		}
 
 		try {
-			const lines: string[] = [];
-			let capturedInitialLocalConfig = false;
-			let initialCapturedFiles = new Set<string>();
-
-			onProgress?.("Checking local repo...");
-
-			if (existsSync(defaultPath) && existsSync(join(defaultPath, ".git"))) {
-				if (force) {
-					// --force: remove existing repo and re-clone
-					onProgress?.("Removing existing repo (--force)...");
-					lines.push(
-						"Force flag set — removing existing repo and re-cloning...",
-					);
-					const { rm } = await import("node:fs/promises");
-					await rm(defaultPath, { recursive: true, force: true });
-					// Continue to clone below
-				} else {
-					// 仓库已存在，验证 origin
-					const existingProbe = await gitProbe(defaultPath, [
-						"remote",
-						"get-url",
-						"origin",
-					]);
-					const existingUrl = existingProbe.stdout.trim();
-
-					if (!urlsMatch(existingUrl, gitUrl)) {
-						return {
-							message:
-								`A config repo already exists at ${defaultPath}\n` +
-								`Existing remote: ${existingUrl}\nProvided URL:   ${gitUrl}\n` +
-								"To switch, remove the existing repo first: rm -rf ~/.pi/config-repo\n" +
-								"Run /pisync after removing or repairing the existing repository.",
-							needsReload: false,
-							ok: false,
-							level: "error",
-						};
-					}
-					lines.push(`Config repo already exists at ${defaultPath}`);
-				}
-			}
-
-			// Clone if no existing repo (or after force-removal above)
-			if (!existsSync(defaultPath) || !existsSync(join(defaultPath, ".git"))) {
-				onProgress?.(`Cloning ${gitUrl}...`);
-				lines.push(`Cloning ${gitUrl}...`);
-				await mkdir(join(defaultPath, ".."), { recursive: true });
-
-				// Preflight
-				onProgress?.("Checking remote connectivity...");
-				const preflight = await gitProbe(
-					process.cwd(),
-					["ls-remote", "--", gitUrl],
-					{ timeout: 30000 },
-				);
-				if (!preflight.ok) {
-					return {
-						message:
-							`Clone failed: cannot reach ${gitUrl}\n${preflight.stderr.trim() || preflight.stdout.trim()}\n\n` +
-							"Verify the URL, your network, and (for SSH URLs) that your key can authenticate.",
-						needsReload: false,
-						ok: false,
-						level: "error",
-					};
-				}
-
-				try {
-					await gitExec(
-						join(defaultPath, ".."),
-						["clone", "--", gitUrl, defaultPath],
-						{ timeout: 60000 },
-					);
-				} catch (cloneErr) {
-					if (existsSync(defaultPath)) {
-						const { rm } = await import("node:fs/promises");
-						await rm(defaultPath, { recursive: true, force: true });
-					}
-					const msg =
-						cloneErr instanceof GitCommandError
-							? cloneErr.stderr || cloneErr.stdout || cloneErr.message
-							: cloneErr instanceof Error
-								? cloneErr.message
-								: "Unknown error";
-					return {
-						message: `Clone failed:\n${msg}`,
-						needsReload: false,
-						ok: false,
-						level: "error",
-					};
-				}
-				if (!existsSync(join(defaultPath, ".git"))) {
-					return {
-						message: "Clone completed but .git directory not found.",
-						needsReload: false,
-						ok: false,
-						level: "error",
-					};
-				}
-				lines.push("Clone complete.");
-			}
-
-			// Fetch latest
-			onProgress?.("Fetching latest changes...");
-			await gitFetch(defaultPath).catch(() => {});
-
-			// 检测仓库状态
-			onProgress?.("Analyzing repo state...");
-			const repoState = await detectRepoState(defaultPath);
-
-			if (force || repoState === "empty") {
-				// Scaffold schema v2
-				// force: always scaffold regardless of repo state — skip the "invalid" error below
-				if (force && repoState !== "empty") {
-					onProgress?.("Clearing existing repo contents (--force)...");
-					lines.push("Force flag set — clearing existing repo contents...");
-					await clearRepoContents(defaultPath);
-					await gitExec(defaultPath, ["add", "-A"]);
-					await gitExec(defaultPath, [
-						"commit",
-						"-m",
-						"pi-sync: force clear before rebuild",
-						"--allow-empty",
-					]);
-				}
-
-				onProgress?.("Scaffolding config structure...");
-				lines.push(
-					`${force && repoState !== "empty" ? "Force rebuilding" : "Empty repository"} — scaffolding config structure (schema v2)...`,
-				);
-				await scaffoldConfigRepoV2(defaultPath);
-				const scaffoldConfig = await loadPiSyncConfig(defaultPath);
-				// An empty repository is initialized from this machine. Seed an in-memory
-				// baseline from the scaffold before capture so local settings replace the
-				// placeholder instead of being misclassified as a bilateral conflict.
-				const initialCapture = await this.captureInitialLocalConfig(
-					defaultPath,
-					scaffoldConfig,
-				);
-				if (initialCapture.hasConflicts || initialCapture.errors.length > 0) {
-					const details = initialCapture.hasConflicts
-						? initialCapture.conflicts
-								.map((conflict) => conflict.relativePath)
-								.join(", ")
-						: initialCapture.errors
-								.map((error) => `${error.file}: ${error.message}`)
-								.join("\n");
-					return {
-						message: `Initial local configuration capture failed: ${details}`,
-						needsReload: false,
-						ok: false,
-						code: "blocked_conflict",
-						level: "error",
-					};
-				}
-				initialCapturedFiles = new Set(initialCapture.captured);
-				capturedInitialLocalConfig =
-					initialCapture.captured.length > 0 ||
-					initialCapture.deleted.length > 0;
-				if (capturedInitialLocalConfig) {
-					lines.push(
-						`Captured ${initialCapture.captured.length} local config file(s) into the new repository.`,
-					);
-				}
-
-				onProgress?.("Committing scaffold and local config...");
-				await gitCommit(defaultPath, "pi-sync: initial config scaffold (v2)");
-
-				onProgress?.("Pushing to remote...");
-				await gitRenameBranch(defaultPath, scaffoldConfig.branch);
-				try {
-					const pushArgs = force
-						? ["push", "--force", "origin", scaffoldConfig.branch]
-						: ["push", "origin", scaffoldConfig.branch];
-					if (force) {
-						await gitExec(defaultPath, pushArgs);
-						await gitPushHeadToBranch(
-							defaultPath,
-							await this.getDeviceBranchName(),
-						);
-					} else {
-						await this.pushMainAndDeviceBranches(
-							defaultPath,
-							scaffoldConfig.branch,
-						);
-					}
-					lines.push(
-						`Scaffold committed and pushed to origin/${scaffoldConfig.branch} and the current-device branch.`,
-					);
-				} catch (err) {
-					await updateState(this.agentDir, { repoPath: defaultPath });
-					const detail = err instanceof Error ? err.message : "Unknown error";
-					return {
-						message:
-							`${lines.join("\n")}\n\n` +
-							"Scaffold committed locally but could not be pushed.\n" +
-							"Resolve the remote issue, then run /pisync.\n" +
-							`Details: ${detail}`,
-						needsReload: false,
-						ok: false,
-						level: "warning",
-					};
-				}
-				lines.push("");
-			} else if (repoState === "invalid") {
-				return {
-					message:
-						`The repository at ${gitUrl} has commits but is not a valid pi-sync config repo.\n` +
-						"A pi-sync config repo must have a pi-sync.json at its root.\n" +
-						"Either use an empty repository for auto-scaffolding, or ensure the repo contains a valid pi-sync.json file.\n\n" +
-						"Repair or replace the repository, then run /pisync again.",
-					needsReload: false,
-					ok: false,
-					level: "error",
-				};
-			} else {
-				// Valid sync repo: fetch once, then update from the local tracking ref.
-				onProgress?.("Fetching latest...");
-				lines.push("Valid sync repo detected — fetching latest...");
-				const existingConfig = await loadPiSyncConfig(defaultPath);
-				await gitFetch(defaultPath, {
-					timeout: existingConfig.pullTimeoutMs,
-				});
-				await ensureConfiguredBranch(defaultPath, existingConfig.branch);
-				const { pulled } = await gitFastForward(
-					defaultPath,
-					existingConfig.branch,
-					{ timeout: existingConfig.pullTimeoutMs },
-				);
-				lines.push(pulled ? "Updated to latest." : "Already up to date.");
-			}
-
-			// 更新 state（但不再 pi install）
-			onProgress?.("Saving state...");
-			await updateState(this.agentDir, { repoPath: defaultPath });
-
-			// Apply config
-			onProgress?.("Applying config to agent...");
-			const config = await loadPiSyncConfig(defaultPath);
-			let state = await loadState(this.agentDir);
-			if (initialCapturedFiles.size > 0) {
-				// captureChanges sanitizes machine-local package sources before writing
-				// settings.json to the shared repository. Seed only the files captured
-				// from this machine so applyCurrent sees that sanitized copy as the
-				// baseline, rather than treating it as a simultaneous remote edit.
-				// Leave untouched scaffold files unbased so they can still be applied.
-				const repositoryBaseline = await this.createRepositoryBaseline(
-					defaultPath,
-					config,
-					state,
-				);
-				state = {
-					...state,
-					files: Object.fromEntries(
-						Object.entries(repositoryBaseline.files).filter(([relativePath]) =>
-							initialCapturedFiles.has(relativePath),
-						),
-					),
-				};
-			}
-			const applyResult = await this.applyCurrent(
-				defaultPath,
-				config,
-				state,
-				"init",
+			return await executeSetupFlow({
+				agentDir: this.agentDir,
+				gitUrl,
+				repoPath: defaultPath,
+				force,
 				packageApproval,
-			);
-			lines.push(applyResult.message);
-
-			if (!applyResult.ok) {
-				return {
-					message: lines.join("\n"),
-					needsReload: false,
-					ok: false,
-					code: applyResult.code,
-					details: applyResult.details,
-					level: applyResult.code === "approval_required" ? "warning" : "error",
-				};
-			}
-
-			lines.push("");
-			lines.push("Setup complete! Your config is now synced.");
-			lines.push("Use /pisync for day-to-day sync operations.");
-
-			return {
-				message: lines.join("\n"),
-				needsReload: applyResult.reload || capturedInitialLocalConfig,
-				ok: true,
-				level: "info",
-			};
-		} catch (err) {
-			return {
-				message: `Init failed: ${err instanceof Error ? err.message : "Unknown error"}`,
-				needsReload: false,
-				ok: false,
-				level: "error",
-			};
+				onProgress,
+				captureInitialLocalConfig: (repoPath, config) =>
+					this.captureInitialLocalConfig(repoPath, config),
+				createRepositoryBaseline: (repoPath, config, state) =>
+					this.createRepositoryBaseline(repoPath, config, state),
+				applyCurrent: (repoPath, config, state, reason, approval) =>
+					this.applyCurrent(repoPath, config, state, reason, approval),
+				getDeviceBranchName: () => this.getDeviceBranchName(),
+				pushMainAndDeviceBranches: (repoPath, branch) =>
+					this.pushMainAndDeviceBranches(repoPath, branch),
+			});
 		} finally {
 			await this.lock.release();
 		}
@@ -2766,7 +2441,6 @@ export class PiSyncCommands {
 		useRemoteForConflicts?: ReadonlySet<string>,
 	): Promise<CommandResult> {
 		const commit = await getHeadCommit(rp);
-		const lines: string[] = [];
 
 		// 1. 生成 apply 计划（包含完整 nextBaseline）
 		const plan = await planMaterialize(this.agentDir, rp, config, state, {
@@ -2787,12 +2461,13 @@ export class PiSyncCommands {
 			}
 			if (plan.conflicts.length > 0) {
 				try {
-					const preservation = await this.preserveConflictOnDeviceBranch(
+					const coordination = await this.coordinateDeviceBranchConflict(
 						rp,
 						config,
 						state,
+						conflictPathsFrom(plan.conflicts),
 					);
-					if (preservation.fastForwarded) {
+					if (coordination.kind === "resolved") {
 						const resolved = await this.applyCurrent(
 							rp,
 							config,
@@ -2803,40 +2478,11 @@ export class PiSyncCommands {
 						);
 						return {
 							...resolved,
-							message: `${this.formatFastForwardedConflictMessage(config)}\n${resolved.message}`,
+							message: `${coordination.message}\n${resolved.message}`,
 						};
 					}
-					if (
-						await this.mergeDeviceBranchIntoShared(
-							rp,
-							config,
-							preservation.branch,
-						)
-					) {
-						const resolved = await this.applyCurrent(
-							rp,
-							config,
-							state,
-							reason,
-							packageApproval,
-							true,
-						);
-						return {
-							...resolved,
-							message: `${this.formatMergedConflictMessage(config)}\n${resolved.message}`,
-						};
-					}
-					conflictRequest = await this.createSyncConflictRequest(
-						rp,
-						config,
-						preservation.branch,
-						preservation.paths.length > 0
-							? preservation.paths
-							: conflictPathsFrom(plan.conflicts),
-					);
-					errorLines.push(
-						this.formatManualMergeMessage(rp, config, preservation.branch),
-					);
+					conflictRequest = coordination.conflict;
+					errorLines.push(coordination.message);
 				} catch (error) {
 					errorLines.push(
 						`Could not create a current-device conflict branch: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -2887,182 +2533,16 @@ export class PiSyncCommands {
 				};
 			}
 		}
-		let packageResult: Awaited<ReturnType<typeof executePackagePlan>> = {
-			installed: [],
-			errors: [],
-		};
-
-		// 3. 无文件 I/O 且基线已一致 → 真正 no-op
-		const hasFileOperations =
-			plan.toWrite.length > 0 || plan.toDelete.length > 0;
-		const baselineChanged =
-			plan.nextBaseline !== null &&
-			JSON.stringify(plan.nextBaseline) !== JSON.stringify(state.files);
-		const commitChanged = state.lastSyncedCommit !== commit;
-		const branchChanged = state.branch !== config.branch;
-
-		if (
-			!hasFileOperations &&
-			!baselineChanged &&
-			!commitChanged &&
-			!branchChanged
-		) {
-			return {
-				ok: true,
-				code: "noop",
-				message: "pi-git-sync: Already up to date.",
-				reload: false,
-			};
-		}
-
-		// 3. 无文件 I/O 但基线或 commit 需要收敛 → 仅更新 state，不 reload
-		if (!hasFileOperations && plan.nextBaseline) {
-			await updateState(this.agentDir, {
-				lastSyncedCommit: commit,
-				lastSyncedAt: new Date().toISOString(),
-				branch: config.branch,
-				files: plan.nextBaseline,
-				pendingOperation: null,
-			});
-			lines.push("Sync state updated (no file changes needed).");
-
-			return { ok: true, code: "ok", message: lines.join("\n"), reload: false };
-		}
-
-		// 4. 有文件变更 → 创建备份。备份失败时 fail-closed，绝不开始写入。
-		let backup: Awaited<ReturnType<typeof createBackup>>;
-		try {
-			backup = await createBackup(this.agentDir, commit, reason, plan);
-		} catch (error) {
-			return {
-				ok: false,
-				code: "partial_failure",
-				message: `Backup failed; apply blocked: ${error instanceof Error ? error.message : "Unknown"}`,
-				reload: false,
-				details: { backupFailed: true },
-			};
-		}
-		lines.push(`Backup created: ${backup.timestamp}`);
-
-		// 5. 执行写入
-		const result = await executeMaterialize(this.agentDir, plan);
-
-		if (result.failed.length > 0) {
-			// 失败 → 回滚
-			lines.push(`ERROR: ${result.failed.length} files failed to apply.`);
-			try {
-				await restoreBackup(this.agentDir, backup);
-				lines.push("Rolled back to pre-apply state.");
-			} catch (rollbackErr) {
-				lines.push(
-					`Rollback failed: ${rollbackErr instanceof Error ? rollbackErr.message : "Unknown"}. ` +
-						`Manual restore from backup: ${backup.path}`,
-				);
-			}
-			lines.push(
-				`Failed files: ${result.failed.map((f) => f.file).join(", ")}`,
-			);
-			return {
-				ok: false,
-				code: "partial_failure",
-				message: lines.join("\n"),
-				reload: false,
-			};
-		}
-
-		if (result.written.length > 0) {
-			lines.push(`Files written: ${result.written.length}`);
-		}
-		if (result.deleted.length > 0) {
-			lines.push(`Files deleted: ${result.deleted.length}`);
-		}
-
-		// 6. settings 已经写入后才执行 package 安装。安装失败时恢复本次
-		//    apply，保留 pending operation，并且绝不提交完成状态。
-		try {
-			packageResult = await executePackagePlan(packagePlan, this.agentDir, {
-				approval: packageApproval,
-			});
-		} catch (error) {
-			packageResult = {
-				installed: [],
-				errors: [
-					`Unexpected package execution failure: ${error instanceof Error ? error.message : "Unknown"}`,
-				],
-			};
-		}
-		if (
-			packageResult.approvalRequired?.length ||
-			packageResult.errors.length > 0
-		) {
-			lines.push(
-				`ERROR: Package installation failed: ${
-					packageResult.errors.join("; ") ||
-					packageResult.approvalRequired?.join(", ") ||
-					"Unknown"
-				}`,
-			);
-			try {
-				await restoreBackup(this.agentDir, backup);
-				lines.push("Rolled back to pre-apply state.");
-			} catch (rollbackErr) {
-				lines.push(
-					`Rollback failed: ${rollbackErr instanceof Error ? rollbackErr.message : "Unknown"}. ` +
-						`Manual restore from backup: ${backup.path}`,
-				);
-			}
-			try {
-				await updateState(this.agentDir, {
-					pendingOperation: {
-						type: "apply-failed",
-						startedAt: new Date().toISOString(),
-						context: {
-							commit,
-							reason,
-							backupPath: backup.path,
-							packageErrors: packageResult.errors,
-						},
-					},
-				});
-			} catch (stateError) {
-				lines.push(
-					`Could not record pending operation: ${stateError instanceof Error ? stateError.message : "Unknown"}`,
-				);
-			}
-			return {
-				ok: false,
-				code: "partial_failure",
-				message: lines.join("\n"),
-				reload: false,
-			};
-		}
-
-		// 7. 用 nextBaseline 完整替换 state.files（不合并）
-		if (!plan.nextBaseline) {
-			lines.push("ERROR: No baseline computed after successful apply.");
-			return {
-				ok: false,
-				code: "partial_failure",
-				message: lines.join("\n"),
-				reload: false,
-			};
-		}
-
-		await updateState(this.agentDir, {
-			lastSyncedCommit: commit,
-			lastSyncedAt: new Date().toISOString(),
-			branch: config.branch,
-			lastBackup: backup.timestamp,
-			files: plan.nextBaseline,
-			pendingOperation: null,
+		return executeApplyTransaction({
+			agentDir: this.agentDir,
+			commit,
+			config,
+			state,
+			reason,
+			plan,
+			packagePlan,
+			packageApproval,
 		});
-
-		// package 已在写入后完成安装；此处只提交同步状态。
-		if (packageResult.installed.length > 0) {
-			lines.push(`Packages installed: ${packageResult.installed.join(", ")}`);
-		}
-
-		return { ok: true, code: "ok", message: lines.join("\n"), reload: true };
 	}
 
 	private normalizeRepoChangedFiles(
@@ -3210,125 +2690,4 @@ export class PiSyncCommands {
 		await walk(syncRoot);
 		return files;
 	}
-}
-
-// ========== 辅助函数 ==========
-
-async function detectRepoState(
-	repoPath: string,
-): Promise<"empty" | "valid" | "invalid"> {
-	let hasCommits = false;
-	const probe = await gitProbe(repoPath, ["rev-list", "--count", "HEAD"]);
-	hasCommits = probe.ok && parseInt(probe.stdout.trim(), 10) > 0;
-
-	if (!hasCommits) return "empty";
-	if (existsSync(join(repoPath, "pi-sync.json"))) return "valid";
-	return "invalid";
-}
-
-/**
- * 在空仓库中生成 schema v2 脚手架
- * 不再生成 package.json（配置仓库不是 Pi Package）
- */
-async function scaffoldConfigRepoV2(repoPath: string): Promise<void> {
-	const { mkdir: mkd, writeFile: wf } = await import("node:fs/promises");
-
-	await mkd(join(repoPath, "sync"), { recursive: true });
-	await mkd(join(repoPath, "sync", "extensions"), { recursive: true });
-	await mkd(join(repoPath, "sync", "skills"), { recursive: true });
-	await mkd(join(repoPath, "sync", "prompts"), { recursive: true });
-	await mkd(join(repoPath, "sync", "themes"), { recursive: true });
-
-	// pi-sync.json (schema v2)
-	const piSync = {
-		schemaVersion: 2,
-		branch: "main",
-		root: "sync",
-		include: [
-			"settings.json",
-			"AGENTS.md",
-			"SYSTEM.md",
-			"APPEND_SYSTEM.md",
-			"keybindings.json",
-			"extensions/**",
-			"skills/**",
-			"prompts/**",
-			"themes/**",
-		],
-		exclude: ["**/.DS_Store", "**/*.tmp", "**/*.log", "extensions/**/logs/**"],
-		delete: "tracked",
-		pullTimeoutMs: 10000,
-		security: {
-			scanSecretsBeforePush: true,
-		},
-	};
-	await wf(
-		join(repoPath, "pi-sync.json"),
-		JSON.stringify(piSync, null, 2),
-		"utf-8",
-	);
-
-	// sync/settings.json (空模板)
-	await wf(
-		join(repoPath, "sync", "settings.json"),
-		JSON.stringify(
-			{
-				packages: ["npm:@jachy/pi-git-sync"],
-			},
-			null,
-			2,
-		),
-		"utf-8",
-	);
-
-	// .gitignore
-	await wf(join(repoPath, ".gitignore"), "# Local state\n.pi-sync/\n", "utf-8");
-}
-
-function isValidGitUrl(url: string): boolean {
-	if (/^git@[\w.-]+:[\w./-]+(\.git)?$/.test(url)) return true;
-	if (/^https?:\/\/[\w.-]+(:\d+)?\/[\w./-]+(\.git)?$/.test(url)) return true;
-	if (/^ssh:\/\/git@[\w.-]+(:\d+)?\/[\w./-]+(\.git)?$/.test(url)) return true;
-	if (/^git:\/\/[\w.-]+(:\d+)?\/[\w./-]+(\.git)?$/.test(url)) return true;
-	return false;
-}
-
-function urlsMatch(a: string, b: string): boolean {
-	const normalize = (url: string) =>
-		url
-			.replace(/^https?:\/\//, "")
-			.replace(/^ssh:\/\/git@/, "")
-			.replace(/^git@/, "")
-			.replace(/\.git$/, "")
-			.replace(/:\d+\//, "/")
-			.toLowerCase();
-	return normalize(a) === normalize(b);
-}
-
-/**
- * 清空仓库工作目录中的所有文件（保留 .git 目录）
- */
-async function clearRepoContents(repoPath: string): Promise<void> {
-	const { readdir: rd, rm } = await import("node:fs/promises");
-
-	async function walk(dir: string): Promise<void> {
-		if (!existsSync(dir)) return;
-		let entries;
-		try {
-			entries = await rd(dir, { withFileTypes: true });
-		} catch {
-			return;
-		}
-		for (const entry of entries) {
-			if (entry.name === ".git") continue;
-			const fullPath = join(dir, entry.name);
-			try {
-				await rm(fullPath, { recursive: true, force: true });
-			} catch {
-				// 忽略删除失败
-			}
-		}
-	}
-
-	await walk(repoPath);
 }

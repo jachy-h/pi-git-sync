@@ -2,6 +2,25 @@
 
 All notable changes to `@jachy/pi-git-sync` are documented here.
 
+## [0.5.0] - Unreleased
+
+### Added
+
+- Explicit lock-free setup, pull, push, apply, and extension operation-runner phase boundaries.
+- Core lifecycle contracts for setup preflight/onboarding, lock contention, stale preparation, rollback/retry, pending recovery, and pull/push phase outcomes.
+- Coverage gates for command orchestration and the extracted extension operation runner.
+
+### Changed
+
+- `PiSyncCommands` now focuses on public façade behavior, lifecycle, lock ownership, phase ordering, and conflict coordination.
+- Setup, apply, pull/push Git integration, and extension progress/cancel/watchdog behavior retain their existing public semantics while executing through dedicated modules.
+- CI runs core coverage and the two-device E2E suite separately, so E2E executes once per `test:ci` invocation.
+
+### Compatibility
+
+- No public command, config schema v2, state schema v3, device-branch, backup, package-approval, or secret-scan behavior change.
+- See [the upgrade guide](docs/upgrade.md) for the v0.5 verification steps.
+
 ## [0.4.0] - 2026-07-28
 
 ### Added

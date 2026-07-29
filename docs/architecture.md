@@ -58,7 +58,12 @@ pi-git-sync/
 ├── scripts/
 │   └── bootstrap.sh          # 新机器自举脚本
 ├── src/
-│   ├── commands.ts           # /pisync 编排、冲突 request 与 resolveConflict 入口
+│   ├── commands.ts           # 公共 façade、lifecycle、lock、phase ordering、冲突协调
+│   ├── apply-transaction.ts  # 已批准且无冲突的 backup → materialize → package → state 事务
+│   ├── pull-phase.ts         # 无锁 worktree/capture-commit/fetch/rebase-or-ff 阶段
+│   ├── push-phase.ts         # 无锁 committed-push fetch/rebase 阶段
+│   ├── setup-flow.ts         # 无锁 clone/scaffold/onboarding/initial apply 阶段
+│   ├── operation-runner.ts   # UI-agnostic progress/cancel/watchdog runner
 │   ├── conflict-resolution.ts # local/remote 自动选边 Git 事务
 │   ├── config.ts             # pi-sync.json schema v2 加载 & 校验
 │   ├── inventory.ts          # 三方文件比较引擎（baseline vs local vs remote）
@@ -77,8 +82,8 @@ pi-git-sync/
 │   ├── ui.ts                 # 格式化输出（status/diff/backup/capture）
 └── test/
     ├── helpers/              # temp-env, git-fixture, fake-pi, factories
-    ├── e2e/                  # 两设备端到端测试
-    ├── *.test.ts             # 33 个测试文件，321 个测试
+    ├── e2e/                  # 两设备端到端测试（CI 中仅执行一次）
+    ├── *.test.ts             # core 契约、phase matrix 与 extension 测试
     └── ...
 ```
 
@@ -178,66 +183,41 @@ v2 → v3 迁移会先备份旧 state。只有 local/repo hash 相同的路径�
 ```mermaid
 graph TB
     subgraph "Extension 层"
-        index["index.ts<br/>命令注册 · TUI · 事件"]
+        index["index.ts<br/>命令注册 · UI 输入/通知"]
+        runner["operation-runner.ts<br/>progress · Escape · watchdog"]
     end
 
-    subgraph "命令编排层"
-        commands["commands.ts<br/>push/pull/init/status/diff/<br/>capture"]
+    subgraph "Facade 与 phase 层"
+        commands["commands.ts<br/>lifecycle · lock · phase ordering · conflict"]
+        setup["setup-flow.ts"]
+        pull["pull-phase.ts"]
+        push["push-phase.ts"]
+        apply["apply-transaction.ts"]
     end
 
-    subgraph "核心引擎层"
-        inventory["inventory.ts<br/>三方比较"]
-        capture["capture.ts<br/>agent → repo"]
-        materialize["materialize.ts<br/>repo → agent"]
+    subgraph "核心引擎与持久化层"
+        git["git.ts"]
+        inventory["inventory.ts / capture.ts / materialize.ts"]
+        state["state.ts / backup.ts / config.ts"]
+        safety["path-safety.ts / security.ts / validate.ts / packages.ts"]
+        lock["lock.ts"]
     end
 
-    subgraph "Git 层"
-        git["git.ts<br/>fetch/pull/push/rebase/<br/>status/commit"]
-    end
-
-    subgraph "安全与校验层"
-        security["security.ts<br/>hard deny + secret scan"]
-        glob["glob.ts<br/>minimatch + path 安全"]
-        validate["validate.ts<br/>JSON/conflict/portability"]
-        lock["lock.ts<br/>并发锁"]
-    end
-
-    subgraph "状态与持久化层"
-        state["state.ts<br/>基线持久化"]
-        backup["backup.ts<br/>备份恢复"]
-        config["config.ts<br/>pi-sync.json 校验"]
-    end
-
-    subgraph "辅助层"
-        packages["packages.ts<br/>package reconcile"]
-        ui["ui.ts<br/>格式化输出"]
-    end
-
-    index --> commands
-    commands --> inventory
-    commands --> capture
-    commands --> materialize
-    commands --> git
-    commands --> backup
+    index --> runner --> commands
     commands --> lock
-    commands --> security
-    commands --> validate
-    commands --> state
-    commands --> config
-    commands --> packages
-
-    inventory --> glob
-    inventory --> state
-    capture --> inventory
-    capture --> glob
-    capture --> security
-    materialize --> inventory
-    materialize --> glob
-    materialize --> security
-    materialize --> validate
-    
-    git --> commands
-    backup --> materialize
+    commands --> setup
+    commands --> pull
+    commands --> push
+    commands --> apply
+    setup --> git
+    setup --> inventory
+    setup --> state
+    pull --> git
+    push --> git
+    apply --> inventory
+    apply --> state
+    commands --> safety
+    inventory --> safety
 ```
 
 ---
@@ -325,6 +305,13 @@ node_modules/**    .pi-sync/**        **/.env
 │  • 释放幂等                             │
 └────────────────────────────────────────┘
 ```
+
+### v0.5 锁所有权边界
+
+- `run()` 在完整 setup / recovery / pull → push 生命周期持有同步锁；UI 的 URL、审批和冲突选择发生在该调用返回后，因此不会在用户等待期间持锁。
+- standalone `apply()`、`pull()`、`preparePush()`、`executePush()` 和 `pushContinue()` 通过统一 helper 取得锁；锁忙时 fail-closed。
+- `setup-flow.ts`、`pull-phase.ts`、`push-phase.ts`、`apply-transaction.ts` 均为无锁 phase：它们不 import `PiSyncCommands`，由 façade 单向调用。
+- `operation-runner.ts` 只管理 AbortSignal、进度、Escape 与 watchdog；不读取 Git、state、package 或 conflict 领域数据。
 
 ---
 
@@ -427,34 +414,28 @@ sequenceDiagram
     participant R as Repo
     participant O as Origin
 
-    Note over A,O: /pisync（统一同步）
-
-    A->>A: ① acquire lock
-    
-    A->>R: ② 检查 repo 状态<br/>(rebase/merge? dirty?)
-    R-->>A: clean ✓
-    
-    A->>A: ③ compareFiles()<br/>检查 agent 是否有未捕获修改
-    
-    alt 有本地修改
-        A-->>A: ⚠ 停止！提示先 push
-    else 无本地修改
-        R->>O: ④ git fetch origin
-        O-->>R: 远端 refs
-        
-        R->>R: ⑤ isDiverged()?
-        
-        alt 分叉
-            R-->>A: ⚠ 停止！提示手动处理
-        else 可 fast-forward
-            R->>R: ⑥ git merge --ff-only origin/&lt;branch&gt;
-            R->>A: ⑦ planMaterialize + executeMaterialize
-            A->>A: ⑧ 更新 state baseline
-            A->>A: ⑨ reconcile packages
-            A->>A: ctx.reload()
-        end
+    Note over A,O: /pisync（统一同步中的 pull phase）
+    A->>R: ① inspect configured branch / rebase / merge / worktree
+    alt repo worktree dirty
+        R->>R: ② commit repository changes before pull
+    end
+    A->>R: ③ compare + capture agent-only changes
+    alt captured local changes
+        R->>R: ④ commit captured changes
+        R->>O: ⑤ fetch origin
+        R->>R: ⑥ rebase origin/&lt;branch&gt;
+    else no captured local changes
+        R->>O: ⑤ fetch origin
+        R->>R: ⑥ fast-forward origin/&lt;branch&gt;
+    end
+    alt rebase conflict
+        R-->>A: preserve current-device branch / structured conflict
+    else integrated
+        R->>A: ⑦ apply transaction → state baseline / packages
     end
 ```
+
+失败或冲突不会进入后续 push phase；device branch、fingerprint 和 approval 仍由 façade 协调。
 
 ### 9.3 Package 审批与执行流程
 
@@ -524,7 +505,7 @@ flowchart TD
     T --> U
 ```
 
-### 9.6 Init 流程
+### 9.6 Setup 流程（`setup-flow.ts`）
 
 ```mermaid
 flowchart TD

@@ -1,6 +1,6 @@
 # pi-git-sync
 
-Keep your Pi setup with you, wherever you work.
+Keep the same Pi setup on every machine.
 
 [![npm](https://img.shields.io/npm/v/@jachy/pi-git-sync)](https://www.npmjs.com/package/@jachy/pi-git-sync)
 
@@ -8,128 +8,100 @@ Keep your Pi setup with you, wherever you work.
 
 ---
 
-## Your Setup, Wherever You Work
+pi-git-sync stores your Pi configuration in one private GitHub repository. It syncs extensions, skills, prompts, themes, settings, and agent instructions.
 
-Connect a private GitHub repository once and let it carry your Pi
-configuration between machines. Your extensions, skills, prompts, themes,
-settings, and agent instructions stay together in one place.
+```text
+first machine                                      another machine
 
-The first machine captures what you already use. On another machine,
-point pi-git-sync at the same repository and pick up from there. Run
-`/pisync` on any device for the complete sync: remote changes are pulled
-first, then local changes are captured and pushed.
+Pi configuration ── /pisync ──> private Git repo ── /pisync ──> Pi configuration
+```
 
-Behind the scenes, pi-git-sync keeps every synced item under `sync/`.
-It compares the last synced state with local and remote changes, then
-stops for your review when the same file changed in two places.
+Run `/pisync` whenever you change your configuration. It protects local work before it updates from the remote repository.
 
----
+```text
+agent files
+   │
+   ├─ capture and commit local changes
+   ├─ fetch the configured branch
+   ├─ rebase local commits, or fast-forward remote-only changes
+   ├─ apply the resulting configuration to Pi
+   └─ push the shared branch and this device's recovery branch
+```
+
+If a step fails, syncing stops. A content conflict keeps both sides recoverable instead of silently overwriting a file.
 
 ## Get Started
 
-### Before You Begin
+### Requirements
 
 - Pi `0.82.1` or newer (Node.js `>=22.19.0`)
-- Git + SSH configured (for GitHub)
+- Git and SSH configured for GitHub
 
-### 1. Create a Private Repo
+### First machine
 
-Create an empty private repository on GitHub (any name you like). Leave
-**Initialize with README** unchecked.
+1. Create an **empty private** GitHub repository. Do not initialize it with a README.
+2. Install the extension:
 
-### 2. Install pi-git-sync on Your First Machine
+   ```bash
+   pi install npm:@jachy/pi-git-sync
+   ```
 
-```bash
-pi install npm:@jachy/pi-git-sync
-```
+3. Run `/pisync` in Pi and enter the repository URL.
 
-The config repository is user data, not a Pi package. Do not run `pi install` on the
-config repository itself.
-
-### 3. Connect Your First Machine
-
-Run `/pisync` in Pi. When prompted, enter your repository URL. For an empty
-repository, pi-git-sync uses this machine as the starting point: it creates the
-configuration structure, captures your current configuration (including
-`settings.json` and its `packages[]`), then commits and pushes it to the repository.
-
-Generated repo structure:
+pi-git-sync creates the repository layout, captures the current configuration, then commits and pushes it. The repository is user data, not a Pi package: do not run `pi install` inside it.
 
 ```text
 <your-repo>/
-├── .gitignore
-├── pi-sync.json              # Sync configuration
-└── sync/                     # All synced content lives here
-    ├── settings.json          # Shared settings (whole file)
-    ├── AGENTS.md              # (optional)
-    ├── SYSTEM.md              # (optional)
-    ├── APPEND_SYSTEM.md       # (optional)
-    ├── keybindings.json       # (optional)
-    ├── extensions/            # Custom extensions
-    ├── skills/                # Skills
-    ├── prompts/               # Prompt templates
-    └── themes/                # Themes
+├── pi-sync.json       # Sync configuration
+└── sync/              # Synced Pi files
+    ├── settings.json
+    ├── extensions/
+    ├── skills/
+    ├── prompts/
+    └── themes/
 ```
 
-### Bring a New Machine Onboard
+### Another machine
 
-Install pi-git-sync, then run `/pisync` and enter your existing repository URL
-when prompted. pi-git-sync fetches the repository and applies its configuration
-to that Pi installation.
+Install pi-git-sync, run `/pisync`, and enter the same repository URL. Its configuration is applied to that Pi installation.
 
-### Share Later Changes
-
-After changing your configuration, run:
+### Daily use
 
 ```bash
 /pisync
 ```
 
-The command pulls remote changes first, then captures and pushes local changes.
-While it runs, the status line shows elapsed time. Press `Esc` to cancel and
-terminate active Git/SSH subprocesses; a run is also stopped automatically after
-60 seconds. The `pullTimeoutMs` setting controls each pull, fetch, and rebase
-operation within that limit. If package changes need approval, pi-git-sync pauses
-before applying them and resumes after approval. Older generated settings
-placeholders with an empty sync baseline are recognized and calibrated without
-copying files.
-
----
+`Esc` cancels an active run and terminates its Git/SSH subprocesses. A run also stops after 60 seconds; `pullTimeoutMs` controls the timeout for each pull, fetch, and rebase operation.
 
 ## Commands
 
-| Command | Description |
+| Command | Purpose |
 | --- | --- |
-| `/pisync` | Set up or run complete pull-then-push sync |
-| `/pisync status` | Show detailed sync status (three-way comparison + git info) |
-| `/pisync diff` | Show pending changes between agent and repo |
-
----
+| `/pisync` | Set up a machine or run the complete sync |
+| `/pisync status` | Show Git and three-way sync status |
+| `/pisync diff` | Show pending differences between Pi and the repository |
 
 ## What Gets Synced
 
-| Content | Method |
+| Content | Location or behavior |
 | --- | --- |
-| Extensions | Copied from `sync/extensions/` into agent directory |
-| Skills | Copied from `sync/skills/` into agent directory |
-| Prompts | Copied from `sync/prompts/` into agent directory |
-| Themes | Copied from `sync/themes/` into agent directory |
-| `settings.json` | Whole-file copy (no key-level merge) |
-| `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md` | Copied into agent directory |
-| `keybindings.json` | Copied into agent directory |
-| Third-party Packages | Declared in `sync/settings.json` → `packages[]`; new or changed sources require approval before installation (local-only packages are never auto-removed) |
+| Extensions, skills, prompts, themes | `sync/extensions/`, `sync/skills/`, `sync/prompts/`, `sync/themes/` |
+| `settings.json` | Whole-file copy; no key-level merge |
+| `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, `keybindings.json` | Copied into the Pi agent directory |
+| Third-party packages | Declared in `sync/settings.json` → `packages[]`; new or changed sources need approval |
 
 ## What Never Gets Synced
 
-Hard deny list (built-in, not configurable):
+The built-in deny list cannot be overridden:
 
-`auth.json`, `sessions/**`, `trust.json`, `models-store.json`, `npm/**`, `git/**`, `node_modules/**`, `.pi-sync/**`, `**/.env`, `**/*.pem`, `**/id_rsa`, `**/id_ed25519`
+```text
+auth.json  sessions/**  trust.json  models-store.json  npm/**  git/**
+node_modules/**  .pi-sync/**  **/.env  **/*.pem  **/id_rsa  **/id_ed25519
+```
 
-Also: hidden files (except `.gitignore`) are excluded. Symlinks and symlink components are blocked with an error; they are never followed or silently skipped.
+Hidden files are excluded except `.gitignore`. Symlinks are blocked; pi-git-sync never follows them.
 
----
-
-## Config Reference (`pi-sync.json`)
+## Configuration (`pi-sync.json`)
 
 ```json
 {
@@ -147,214 +119,87 @@ Also: hidden files (except `.gitignore`) are excluded. Symlinks and symlink comp
     "prompts/**",
     "themes/**"
   ],
-  "exclude": [
-    "**/.DS_Store",
-    "**/*.tmp",
-    "**/*.log"
-  ],
+  "exclude": ["**/.DS_Store", "**/*.tmp", "**/*.log"],
   "delete": "tracked",
   "pullTimeoutMs": 10000,
-  "security": {
-    "scanSecretsBeforePush": true
-  }
+  "security": { "scanSecretsBeforePush": true }
 }
 ```
 
-### Fields
+| Field | Purpose |
+| --- | --- |
+| `branch` | The shared branch used by setup and sync |
+| `root` | Directory in the repository that holds synced files |
+| `include` / `exclude` | Glob allowlist and exclusions under `root` |
+| `delete` | `tracked` deletes files removed from the repository; `none` never deletes |
+| `pullTimeoutMs` | Per-operation pull, fetch, and rebase timeout in milliseconds |
+| `security.scanSecretsBeforePush` | Scan staged files for credentials before push |
 
-| Field | Type | Default | Description |
-| --- | --- | --- | --- |
-| `schemaVersion` | `2` | — | Config schema version (currently `2`) |
-| `branch` | `string` | `"main"` | The single Git branch used by setup, status, sync, and rebase |
-| `root` | `string` | `"sync"` | Root directory inside the repo for synced content |
-| `include` | `string[]` | — | Glob whitelist (relative to `root`). Supports `*`, `**`, `?` |
-| `exclude` | `string[]` | `[]` | Glob patterns to exclude (lower priority than built-in hard deny) |
-| `delete` | `"tracked"` \| `"none"` | `"tracked"` | `"tracked"`: delete agent files when removed from repo. `"none"`: never delete |
-| `pullTimeoutMs` | `number` | `10000` | Timeout for pull/fetch/rebase Git operations in milliseconds; a timeout kills the Git/SSH process tree, stops the sync, and returns control to Pi |
-| `security.scanSecretsBeforePush` | `boolean` | `true` | Scan staged files for secrets (API keys, tokens, private keys) before pushing |
+## How Conflicts Work
 
----
-
-## Sync Model
-
-### Three-Way Comparison
-
-Every sync operation compares three states:
+Every sync compares the last synced version, the local Pi files, and the repository files.
 
 ```text
-B = Baseline (last synced commit hash)  — stored in `<config-repo>/.pi-sync/state.json` (Git ignored)
-L = Local   (current agent files)
-R = Remote  (current repo sync/ files)
+                 changed only here
+baseline ─────┬────────────────────> continue automatically
+              │
+              └── same file changed locally and remotely ──> ask before changing it
 ```
 
-This gives accurate detection of:
+For a real content conflict, choose one of the following:
 
-| Scenario | Classification | Action |
-| --- | --- | --- |
-| Only you changed a file | `local_only` | Captured on push |
-| Only remote changed a file | `remote_only` | Applied on pull |
-| Both changed the same file differently | `both_modified` | **Blocked** — resolve manually |
-| You created a new file | `local_created` | Captured on push |
-| Remote created a new file | `remote_created` | Applied on pull |
-| You deleted a tracked file | `local_deleted` | Captured on push |
-| Remote deleted a tracked file | `remote_deleted` | Applied on pull (if `delete: "tracked"`) |
-| Both made the same change | `converged` | Baseline updated, no conflict |
+- Ask the current Pi agent to merge it.
+- Abort and merge manually.
+- Use local or remote content for only the conflicted paths.
 
-### Push Flow
-
-```text
-capture (agent → repo working tree)
-  → commit
-  → fetch origin
-  → rebase onto origin/<configured branch>
-  → push <configured branch>
-  → push current-device snapshot branch
-  → apply (new HEAD → agent)
-```
-
-Each device has one persistent, unique remote snapshot branch: `pisync-device/<hostname>-<UUID>`. A hostname is not unique; the UUID is stored only in `<config-repo>/.pi-sync/state.json`. That directory is Git-ignored and never synced. The tool therefore never scans remote branches and guesses a “unique device branch.”
-
-On conflict, pi-git-sync pushes current-device changes to that device branch and
-restores the configured branch to the remote configured branch. Clean Git merges
-still complete automatically. A real content conflict presents four explicit choices:
-
-- **Ask agent to merge** sends the current Pi agent a constrained semantic merge task.
-- **Abort — I'll merge manually** keeps both branches unchanged and shows the commands below.
-- **Use local for conflicts** selects current-device content only for unresolved paths.
-- **Use remote for conflicts** selects shared-branch content only for unresolved paths.
-
-The local/remote choices re-fetch, validate the branch OIDs and worktree, create a
-normal merge commit, validate content and secrets, and push without force. Non-conflict
-changes from both sides remain in the merge and the device branch is always retained.
-
-```bash
-cd <sync-repository>
-git fetch origin
-git switch <configured-branch>
-git merge origin/pisync-device/<hostname>-<UUID>
-# resolve conflicts, then
-git add <files>
-git commit
-git push origin <configured-branch>
-# return to Pi and run /pisync again
-```
-
-### Pull Flow
-
-```text
-fetch origin
-  → check for local un-captured changes (block if any)
-  → fast-forward only (block if diverged)
-  → apply (new HEAD → agent)
-```
-
----
+Non-conflicting changes from both sides are retained. Each device also has a persistent recovery branch, so unresolved local changes remain available.
 
 ## Safety
 
-- Pull uses **fast-forward only**; stops on divergence
-- **Bilateral conflict detection** — automatically fast-forwards or cleanly merges
-  a current-device branch; only content conflicts or concurrent remote updates
-  require manual resolution
-- Automatic **secret scanning** before push (API keys, tokens, private keys)
-- **Atomic config writes** (temp file → rename)
-- Automatic **backup** before every apply, with **fail-closed rollback** support
-- **Concurrency lock** prevents multiple Pi instances from syncing simultaneously
-- **Built-in hard deny list** prevents syncing credentials (not user-overridable)
-- Repo and agent **path-boundary checks** block symlink escapes
-- Remote package additions and changes require explicit approval; failed installs attempt package rollback
-- Settings.json **portability validation** — warns about absolute paths and machine-specific content
-
----
+- Local changes are captured before remote updates; remote-only changes fast-forward.
+- Secrets are scanned before every push.
+- Configuration writes are atomic and backed up before apply.
+- A lock prevents simultaneous sync runs.
+- Path-boundary checks prevent symlink escapes.
+- Remote package changes need explicit approval; failed installs attempt rollback.
 
 ## Development
 
-### Local Debugging
-
-Symlink into Pi extensions directory:
+### Load locally
 
 ```bash
 ln -s $(pwd) ~/.pi/agent/extensions/pi-git-sync
-```
+# Then run /reload in Pi.
 
-Then `/reload` in Pi to pick up changes.
-
-Or load temporarily via `-e` (does not write to settings.json):
-
-```bash
+# Or load temporarily without changing settings.json:
 pi -e ./index.ts
 ```
 
-### Run Tests
+### Test
 
 ```bash
 npm install
-npm test           # unit/integration suite
-npm run test:ci    # typecheck + coverage + E2E
-npm run test:watch # watch mode
-npm run typecheck  # type check
-npm audit --omit=dev --audit-level=high
-npm audit --audit-level=high
+npm test           # complete suite, including E2E
+npm run test:core  # core suite without E2E
+npm run test:e2e   # two-device E2E suite
+npm run test:smoke # quick glob and UI checks
+npm run test:ci    # typecheck, coverage gate, and E2E
+npm run typecheck
 ```
 
-### Upgrade Notes
+### Upgrade
 
-When upgrading from `0.2.x` (or an older compatible state), keep the existing config repository and run `/pisync`.
-The local sync state migrates from schema v2 to v3 after backing up the old state.
-Equal local/repo files are reconciled; conflicting files are preserved and reported
-instead of choosing a side. The v0.3 command set removes the old write subcommands;
-use `/pisync` for setup and complete synchronization, and `/pisync status` or
-`/pisync diff` for inspection.
+v0.5 keeps `pi-sync.json` schema v2 and local state schema v3. No repository migration is required: upgrade the extension, run `/pisync status`, then run `/pisync` normally.
 
-See [the full upgrade guide](./docs/upgrade.md).
+See the [upgrade guide](./docs/upgrade.md) for legacy migrations, conflict recovery, and rollback.
 
-### Project Structure
-
-```text
-pi-git-sync/
-├── index.ts              # Extension entry point
-├── package.json
-├── tsconfig.json
-├── scripts/
-│   └── bootstrap.sh      # Bootstrap script for new machines
-├── src/
-│   ├── commands.ts        # /pisync command routing + unified sync flow
-│   ├── config.ts          # pi-sync.json loading & validation
-│   ├── git.ts             # Git operations (status, fetch, fast-forward, push, rebase)
-│   ├── inventory.ts       # Three-way file comparison (baseline vs local vs remote)
-│   ├── materialize.ts     # Apply repo files to agent (atomic writes, validation)
-│   ├── capture.ts         # Import agent changes into repo working tree
-│   ├── backup.ts          # Backup & rollback
-│   ├── lock.ts            # Concurrency lock (pid-based with staleness detection)
-│   ├── security.ts        # Built-in hard deny list & secret scanning
-│   ├── validate.ts        # File content validation (JSON, conflict markers, portability)
-│   ├── state.ts           # Sync state persistence (baseline)
-│   ├── packages.ts        # Package reconciliation (settings.json packages[])
-│   ├── conflict-resolution.ts # Path-level local/remote merge transaction
-│   ├── glob.ts            # Custom minimatch glob + hard deny + path filtering
-│   └── ui.ts              # Output formatting
-└── test/
-    ├── config.test.ts
-    ├── git.test.ts
-    ├── lock.test.ts
-    ├── materialize.test.ts
-    ├── conflict-resolution.test.ts
-    ├── packages.test.ts
-    ├── security.test.ts
-    └── settings.test.ts
-```
-
-### Publishing
+### Publish
 
 ```bash
 npm run pub        # patch version
 npm run pub:minor  # minor version
 npm run pub:major  # major version
 ```
-
-Type checking and tests run automatically before publish. A git tag is created after publish.
-
----
 
 ## License
 

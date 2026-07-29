@@ -1,9 +1,9 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PiSyncCommands } from "../src/commands.ts";
 import { sha256 } from "../src/inventory.ts";
-import { saveState } from "../src/state.ts";
+import { loadState, saveState } from "../src/state.ts";
 import { createSyncState } from "./helpers/factories.ts";
 import { createGitFixture, runGit } from "./helpers/git-fixture.ts";
 import { withTestEnvironment } from "./helpers/temp-env.ts";
@@ -35,6 +35,7 @@ async function seedConfigRepo(repoPath: string): Promise<void> {
 
 type RunResultLike = {
 	ok: boolean;
+	message: string;
 	mode: "setup" | "sync" | "recovery";
 	phase: string;
 	reload: boolean;
@@ -51,6 +52,26 @@ function runOf(
 		}
 	).run(options);
 }
+
+const brokenLifecycleCases = [
+	{
+		name: "the configured repository is missing .git",
+		prepare: async (_repoPath: string) => {},
+	},
+	{
+		name: "the configured repository is missing pi-sync.json",
+		prepare: async (repoPath: string) => {
+			await mkdir(join(repoPath, ".git"), { recursive: true });
+		},
+	},
+	{
+		name: "the configured repository has invalid pi-sync.json",
+		prepare: async (repoPath: string) => {
+			await mkdir(join(repoPath, ".git"), { recursive: true });
+			await writeFile(join(repoPath, "pi-sync.json"), "{}", "utf-8");
+		},
+	},
+] as const;
 
 describe("v0.3 unified command domain contract", () => {
 	it("returns needsGitUrl without performing setup when uninitialized", async () => {
@@ -79,6 +100,79 @@ describe("v0.3 unified command domain contract", () => {
 
 			expect(result.ok).toBe(false);
 			expect(result.details).not.toMatchObject({ needsGitUrl: true });
+		});
+	});
+
+	for (const testCase of brokenLifecycleCases) {
+		it(`fails closed when ${testCase.name}`, async () => {
+			await withTestEnvironment(async (environment) => {
+				const repoPath = join(environment.rootDir, "damaged-repo");
+				await mkdir(repoPath, { recursive: true });
+				await testCase.prepare(repoPath);
+				await saveState(environment.agentDir, createSyncState({ repoPath }));
+
+				const result = await runOf(new PiSyncCommands(environment.agentDir));
+
+				expect(result).toMatchObject({
+					ok: false,
+					mode: "sync",
+					phase: "preflight",
+					reload: false,
+				});
+			});
+		});
+	}
+
+	it("fails closed when the top-level run lock is busy", async () => {
+		await withTestEnvironment(async (environment) => {
+			const fixture = await createGitFixture(environment.rootDir);
+			await seedConfigRepo(fixture.deviceAPath);
+			await saveState(
+				environment.agentDir,
+				createSyncState({ repoPath: fixture.deviceAPath }),
+			);
+			const commands = new PiSyncCommands(environment.agentDir);
+			(
+				commands as unknown as {
+					lock: { acquire: () => Promise<boolean> };
+				}
+			).lock = { acquire: async () => false };
+
+			const result = await runOf(commands);
+
+			expect(result).toMatchObject({
+				ok: false,
+				mode: "sync",
+				phase: "preflight",
+				reload: false,
+			});
+			expect(result.message).toContain("Another sync operation");
+		});
+	});
+
+	it("fails closed when the standalone apply lock is busy", async () => {
+		await withTestEnvironment(async (environment) => {
+			const fixture = await createGitFixture(environment.rootDir);
+			await seedConfigRepo(fixture.deviceAPath);
+			await saveState(
+				environment.agentDir,
+				createSyncState({ repoPath: fixture.deviceAPath }),
+			);
+			const commands = new PiSyncCommands(environment.agentDir);
+			(
+				commands as unknown as {
+					lock: { acquire: () => Promise<boolean> };
+				}
+			).lock = { acquire: async () => false };
+
+			const result = await commands.apply(fixture.deviceAPath);
+
+			expect(result).toMatchObject({
+				ok: false,
+				code: "partial_failure",
+				reload: false,
+			});
+			expect(result.message).toContain("Another sync operation");
 		});
 	});
 
@@ -132,6 +226,221 @@ describe("v0.3 unified command domain contract", () => {
 
 			expect(result.ok).toBe(false);
 			expect(phases).not.toContain("push");
+		});
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"does not enter push after committing repository changes before pull fails",
+		async () => {
+			await withTestEnvironment(async (environment) => {
+				const fixture = await createGitFixture(environment.rootDir);
+				await seedConfigRepo(fixture.deviceAPath);
+				await environment.writeAgentFile("prompts/welcome.md", "baseline\n");
+				await saveState(
+					environment.agentDir,
+					createSyncState({ repoPath: fixture.deviceAPath }),
+				);
+				await writeFile(
+					join(fixture.deviceAPath, "sync/prompts/welcome.md"),
+					"repository edit\n",
+				);
+				const hookPath = join(fixture.deviceAPath, ".git/hooks/pre-commit");
+				await writeFile(hookPath, "#!/bin/sh\nexit 1\n", "utf-8");
+				await chmod(hookPath, 0o755);
+
+				const phases: string[] = [];
+				const result = await runOf(new PiSyncCommands(environment.agentDir), {
+					onProgress: (phase: string) => phases.push(phase),
+				});
+
+				expect(result.ok).toBe(false);
+				expect(result.message).toContain(
+					"Could not commit repository changes before pull",
+				);
+				expect(phases).not.toContain("push");
+			});
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"rolls back a partially written apply and retries safely through run",
+		async () => {
+			await withTestEnvironment(async (environment) => {
+				const fixture = await createGitFixture(environment.rootDir);
+				await seedConfigRepo(fixture.deviceAPath);
+				await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
+				await runGit(fixture.deviceBPath, ["pull", "--ff-only"]);
+				const initialSettings = JSON.stringify({
+					packages: ["npm:@jachy/pi-git-sync"],
+				});
+				await environment.writeAgentFile("settings.json", initialSettings);
+				await environment.writeAgentFile("prompts/welcome.md", "baseline\n");
+				await saveState(
+					environment.agentDir,
+					createSyncState({
+						repoPath: fixture.deviceBPath,
+						files: {
+							"settings.json": { sha256: sha256(initialSettings), mode: 0o644 },
+							"prompts/welcome.md": {
+								sha256: sha256("baseline\n"),
+								mode: 0o644,
+							},
+						},
+					}),
+				);
+				await writeFile(
+					join(fixture.deviceAPath, "sync/prompts/welcome.md"),
+					"remote update\n",
+				);
+				await mkdir(join(fixture.deviceAPath, "sync/prompts/z-blocked"), {
+					recursive: true,
+				});
+				await writeFile(
+					join(fixture.deviceAPath, "sync/prompts/z-blocked/new.md"),
+					"new remote file\n",
+				);
+				await runGit(fixture.deviceAPath, ["add", "--all"]);
+				await runGit(fixture.deviceAPath, [
+					"commit",
+					"--no-gpg-sign",
+					"-m",
+					"Remote apply update",
+				]);
+				await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
+
+				const blockedDir = join(environment.agentDir, "prompts/z-blocked");
+				await mkdir(blockedDir, { recursive: true });
+				await chmod(blockedDir, 0o500);
+				try {
+					const commands = new PiSyncCommands(environment.agentDir);
+					const failed = await runOf(commands);
+
+					expect(failed).toMatchObject({
+						ok: false,
+						mode: "sync",
+						phase: "pull",
+						reload: false,
+					});
+					expect(failed.message).toContain("Rolled back to pre-apply state");
+					expect(
+						await readFile(
+							join(environment.agentDir, "prompts/welcome.md"),
+							"utf-8",
+						),
+					).toBe("baseline\n");
+
+					await chmod(blockedDir, 0o700);
+					const retried = await runOf(commands);
+
+					expect(retried).toMatchObject({
+						ok: true,
+						mode: "sync",
+						phase: "complete",
+					});
+					expect(
+						await readFile(
+							join(environment.agentDir, "prompts/welcome.md"),
+							"utf-8",
+						),
+					).toBe("remote update\n");
+				} finally {
+					await chmod(blockedDir, 0o700);
+				}
+			});
+		},
+	);
+
+	it("recovers a failed package apply through the normal run entry point", async () => {
+		await withTestEnvironment(async (environment) => {
+			const fixture = await createGitFixture(environment.rootDir);
+			await seedConfigRepo(fixture.deviceAPath);
+			await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
+			await runGit(fixture.deviceBPath, ["pull", "--ff-only"]);
+			const initialSettings = JSON.stringify({
+				packages: ["npm:@jachy/pi-git-sync"],
+			});
+			const updatedSettings = JSON.stringify({
+				packages: ["npm:recovery-target@1.0.0"],
+			});
+			await environment.writeAgentFile("settings.json", initialSettings);
+			await environment.writeAgentFile("prompts/welcome.md", "baseline\n");
+			await saveState(
+				environment.agentDir,
+				createSyncState({
+					repoPath: fixture.deviceBPath,
+					files: {
+						"settings.json": { sha256: sha256(initialSettings), mode: 0o644 },
+						"prompts/welcome.md": {
+							sha256: sha256("baseline\n"),
+							mode: 0o644,
+						},
+					},
+				}),
+			);
+			await writeFile(
+				join(fixture.deviceAPath, "sync/settings.json"),
+				updatedSettings,
+			);
+			await runGit(fixture.deviceAPath, ["add", "sync/settings.json"]);
+			await runGit(fixture.deviceAPath, [
+				"commit",
+				"--no-gpg-sign",
+				"-m",
+				"Remote package update",
+			]);
+			await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
+
+			const failOncePath = join(environment.rootDir, "fail-package-once");
+			await writeFile(failOncePath, "", "utf-8");
+			await environment.writeExecutable(
+				"pi",
+				[
+					"#!/bin/sh",
+					'if [ "$1" = "--version" ]; then echo pi-test; exit 0; fi',
+					'if [ "$1" = "install" ] && [ -f "$PI_TEST_FAIL_ONCE" ]; then rm "$PI_TEST_FAIL_ONCE"; exit 7; fi',
+					"exit 0",
+				].join("\n"),
+			);
+			process.env.PI_TEST_FAIL_ONCE = failOncePath;
+			try {
+				const commands = new PiSyncCommands(environment.agentDir);
+				const first = await runOf(commands, {
+					packageApproval: {
+						approvedSources: ["npm:recovery-target@1.0.0"],
+					},
+				});
+				expect(first).toMatchObject({
+					ok: false,
+					mode: "sync",
+					phase: "pull",
+					reload: false,
+				});
+				expect(
+					(await loadState(environment.agentDir)).pendingOperation,
+				).toMatchObject({
+					type: "apply-failed",
+				});
+
+				const recovered = await runOf(commands, {
+					packageApproval: {
+						approvedSources: ["npm:recovery-target@1.0.0"],
+					},
+				});
+				expect(recovered).toMatchObject({
+					ok: true,
+					mode: "sync",
+					phase: "complete",
+					reload: true,
+				});
+				expect(
+					(await loadState(environment.agentDir)).pendingOperation,
+				).toBeNull();
+				expect(
+					await readFile(join(environment.agentDir, "settings.json"), "utf-8"),
+				).toBe(updatedSettings);
+			} finally {
+				delete process.env.PI_TEST_FAIL_ONCE;
+			}
 		});
 	});
 

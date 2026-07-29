@@ -1,10 +1,14 @@
-# v0.3 Upgrade Guide
+# v0.5 Upgrade Guide
 
 ## Scope
 
-This guide covers upgrades from `0.2.x` (and older compatible state) to `0.3.x`.
-The config repository and local state schemas remain compatible; the public command API
-changes to a single setup/sync entry point.
+This guide covers upgrades from `0.4.x` to `0.5.x`, plus the compatible v0.2/v0.3 state migration path retained by current releases.
+
+### v0.5 compatibility
+
+v0.5 is an internal orchestration refactor: setup, pull/push integration, apply, and extension progress handling now have explicit phase boundaries. It does **not** change the public `/pisync` command, `pi-sync.json` schema v2, or local state schema v3.
+
+No repository conversion, state migration, force push, hard reset, or device-branch cleanup is required. Upgrade the extension, then run `/pisync status` followed by `/pisync` normally. Existing pending conflict or `apply-failed` recovery remains handled by the normal `/pisync` entry point.
 
 ## Before upgrading
 
@@ -13,7 +17,7 @@ changes to a single setup/sync entry point.
 3. Keep a copy of the agent directory if the repository contains custom extensions or
    packages.
 
-## State migration
+## Legacy state migration
 
 On the first command that loads state, pi-git-sync:
 
@@ -28,7 +32,7 @@ On the first command that loads state, pi-git-sync:
 A migration conflict is intentionally not resolved automatically. Use `/pisync status`,
 resolve the file manually, then run `/pisync` again.
 
-## Command migration
+## Command migration (v0.3 compatibility)
 
 The following write commands are removed in v0.3 and are not aliases:
 
@@ -49,7 +53,7 @@ rebase. The tool no longer infers the target from the current branch or assumes 
 A clean worktree may be switched to the configured branch. Dirty, merge, and rebase states
 are blocked instead of being switched automatically.
 
-## Conflict handling in v0.4
+## Conflict handling (v0.4+)
 
 A true content conflict now presents explicit choices from `/pisync`: agent-assisted
 semantic merge, manual abort, current-device content for conflict paths, or shared-remote
@@ -105,11 +109,10 @@ recovery aid, not a guarantee that an older version understands every v0.2 opera
 After upgrading, run:
 
 ```bash
-npm run typecheck
-npm test
 npm run test:ci
 npm audit --omit=dev --audit-level=high
 npm audit --audit-level=high
+npm pack --dry-run
 ```
 
 Then run `/pisync status` and confirm that the configured branch, repository path, and
