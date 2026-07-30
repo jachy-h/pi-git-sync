@@ -25,7 +25,10 @@ import { PiSyncCommands } from "./src/orchestration/commands.ts";
 import { runOperation } from "./src/extension/operation-runner.ts";
 import {
 	isSyncConflictRequest,
+	notificationLevelForResult,
+	type CommandResult,
 	type ConflictChoice,
+	type NotificationLevel,
 	type RunOptions,
 	type SyncConflictRequest,
 	type RunResult,
@@ -97,10 +100,7 @@ export default function (pi: ExtensionAPI) {
 			const result = await cmds.clearRepo();
 			ctx.ui.setStatus("pi-sync", undefined);
 
-			ctx.ui.notify(
-				result.message,
-				result.message.includes("successfully") ? "info" : "error",
-			);
+			notifyOperationResult(result, ctx);
 
 			if (result.reload) await ctx.reload();
 		},
@@ -131,48 +131,25 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 
-// ========== 结果类型 ==========
-
-type ResultKind = "success" | "warning" | "error" | "detail";
-
-interface ClassifiedResult {
-	kind: ResultKind;
-	summary: string;
-	detail: string;
-}
+// ========== 结果通知 ==========
 
 /** A UI-agnostic notification payload for completed sync operations. */
 interface OperationNotification {
 	message: string;
-	level: "info" | "warning" | "error";
-}
-
-interface OperationNotificationSource {
-	message: string;
-	ok?: boolean;
-	code?: string;
-	level?: OperationNotification["level"];
+	level: NotificationLevel;
 }
 
 function createOperationNotification(
-	result: OperationNotificationSource,
+	result: CommandResult,
 ): OperationNotification {
 	const message = result.message.startsWith("pi-git-sync: ")
 		? result.message
 		: `pi-git-sync: ${result.message}`;
-	if (result.level) return { message, level: result.level };
-	if (typeof result.ok === "boolean") {
-		return { message, level: result.ok ? "info" : "error" };
-	}
-	const classified = classifyResult(result.message, "Operation");
-	return {
-		message,
-		level: classified.kind === "error" ? "error" : "info",
-	};
+	return { message, level: notificationLevelForResult(result.code) };
 }
 
 function notifyOperationResult(
-	result: OperationNotificationSource,
+	result: CommandResult,
 	ctx: ExtensionCommandContext,
 ): void {
 	const notification = createOperationNotification(result);
@@ -181,70 +158,6 @@ function notifyOperationResult(
 		ctx.ui.theme.fg(color, `◆ ${notification.message}`),
 		notification.level,
 	);
-}
-
-function classifyResult(output: string, operation: string): ClassifiedResult {
-	const lower = output.toLowerCase();
-
-	if (
-		lower.includes("error:") ||
-		lower.includes("failed:") ||
-		lower.includes("fatal:") ||
-		lower.includes("blocked") ||
-		lower.includes("another sync operation is in progress") ||
-		lower.includes("bilateral") ||
-		lower.includes("conflict")
-	) {
-		const firstLine = output.split("\n")[0]!.trim();
-		return {
-			kind: "error",
-			summary: firstLine,
-			detail: output,
-		};
-	}
-
-	if (
-		lower.includes("already up to date") ||
-		lower.includes("no changes") ||
-		lower.includes("up to date") ||
-		lower.includes("nothing to")
-	) {
-		return {
-			kind: "warning",
-			summary: `${operation}: no changes`,
-			detail: output,
-		};
-	}
-
-	if (lower.includes("no config repo")) {
-		return {
-			kind: "warning",
-			summary: "No config repo configured",
-			detail: output,
-		};
-	}
-
-	const successPatterns = [
-		"pushed successfully",
-		"pulled and applied",
-		"rolled back",
-		"capture complete",
-		"setup complete",
-		"already initialized",
-		"scaffold pushed",
-		"scaffold committed",
-		"backup created",
-		"applied successfully",
-		"push continued successfully",
-	];
-
-	for (const pattern of successPatterns) {
-		if (lower.includes(pattern)) {
-			return { kind: "success", summary: `${operation}: done`, detail: output };
-		}
-	}
-
-	return { kind: "detail", summary: "", detail: output };
 }
 
 // ========== 命令处理器 ==========

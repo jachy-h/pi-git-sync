@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { loadPiSyncConfig } from "../sync/config.ts";
 import {
 	GitCommandError,
+	ensureConfiguredBranch,
 	gitCommit,
 	gitExec,
 	gitFastForward,
@@ -374,30 +375,6 @@ async function detectRepoState(
 	const probe = await gitProbe(repoPath, ["rev-list", "--count", "HEAD"]);
 	if (!probe.ok || parseInt(probe.stdout.trim(), 10) === 0) return "empty";
 	return existsSync(join(repoPath, "pi-sync.json")) ? "valid" : "invalid";
-}
-
-async function ensureConfiguredBranch(
-	repoPath: string,
-	branch: string,
-): Promise<void> {
-	const current = await gitProbe(repoPath, ["branch", "--show-current"]);
-	if (current.stdout.trim() === branch) return;
-	const localBranch = await gitProbe(repoPath, [
-		"show-ref",
-		"--verify",
-		`refs/heads/${branch}`,
-	]);
-	if (localBranch.ok) {
-		await gitExec(repoPath, ["switch", branch]);
-		return;
-	}
-	await gitExec(repoPath, [
-		"switch",
-		"--track",
-		"-c",
-		branch,
-		`origin/${branch}`,
-	]);
 }
 
 async function scaffoldConfigRepoV2(repoPath: string): Promise<void> {

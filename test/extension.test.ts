@@ -576,6 +576,55 @@ describe.sequential("pisync running UI", () => {
 		}
 	});
 
+	it("uses the structured result code instead of message text for notifications", async () => {
+		const scenarios: Array<{
+			result: RunResult;
+			level: "info" | "warning" | "error";
+		}> = [
+			{
+				result: {
+					ok: true,
+					code: "ok",
+					message: "fatal: this successful message must remain informational",
+					reload: false,
+					mode: "sync",
+					phase: "complete",
+				},
+				level: "info",
+			},
+			{
+				result: {
+					ok: false,
+					code: "blocked_validation",
+					message: "Setup complete, but validation requires attention",
+					reload: false,
+					mode: "setup",
+					phase: "preflight",
+				},
+				level: "warning",
+			},
+		];
+
+		for (const scenario of scenarios) {
+			const runSpy = vi
+				.spyOn(PiSyncCommands.prototype, "run")
+				.mockResolvedValue(scenario.result);
+			try {
+				const api = new FakeExtensionApi();
+				register(api);
+				const ctx = createRpcContext();
+				await api.commands.get("pisync")!.handler(undefined, ctx);
+
+				expect(ctx.ui.notifications.at(-1)).toMatchObject({
+					message: expect.stringContaining(scenario.result.message),
+					level: scenario.level,
+				});
+			} finally {
+				runSpy.mockRestore();
+			}
+		}
+	});
+
 	it("hard-stops a run at 60 seconds", async () => {
 		vi.useFakeTimers();
 		let observedSignal: AbortSignal | undefined;

@@ -10,6 +10,13 @@ export type ResultCode =
 	| "git_failed"
 	| "partial_failure";
 
+export type NotificationLevel = "info" | "warning" | "error";
+type FailureResultCode = Exclude<ResultCode, "ok" | "noop">;
+
+function assertNever(value: never): never {
+	throw new Error(`Unexpected result code: ${value}`);
+}
+
 export type RunMode = "setup" | "sync" | "recovery";
 export type SyncPhase = "preflight" | "pull" | "apply" | "push" | "complete";
 
@@ -83,4 +90,57 @@ export interface CommandResult {
 	message: string;
 	reload: boolean;
 	details?: unknown;
+}
+
+export function successResult(
+	message: string,
+	reload = false,
+	details?: unknown,
+): CommandResult {
+	const result = { ok: true, code: "ok" as const, message, reload };
+	return details === undefined ? result : { ...result, details };
+}
+
+export function noopResult(
+	message: string,
+	details?: unknown,
+): CommandResult {
+	const result = { ok: true, code: "noop" as const, message, reload: false };
+	return details === undefined ? result : { ...result, details };
+}
+
+export function failureResult(
+	code: FailureResultCode,
+	message: string,
+	details?: unknown,
+): CommandResult {
+	const result = { ok: false, code, message, reload: false };
+	return details === undefined ? result : { ...result, details };
+}
+
+export function conflictResult(
+	message: string,
+	details?: unknown,
+): CommandResult {
+	return failureResult("blocked_conflict", message, details);
+}
+
+export function notificationLevelForResult(
+	code: ResultCode,
+): NotificationLevel {
+	switch (code) {
+		case "ok":
+		case "noop":
+			return "info";
+		case "blocked_conflict":
+		case "blocked_validation":
+		case "blocked_secret":
+		case "approval_required":
+			return "warning";
+		case "git_failed":
+		case "partial_failure":
+			return "error";
+		default:
+			return assertNever(code);
+	}
 }

@@ -859,6 +859,8 @@ describe.sequential("PiSyncCommands.push (rebase conflict and --continue)", () =
 			);
 
 			expect(result).toMatchObject({
+				ok: true,
+				code: "noop",
 				reload: false,
 				message: expect.stringContaining("No pending push operation"),
 			});
@@ -930,6 +932,8 @@ describe.sequential("PiSyncCommands.push (rebase conflict and --continue)", () =
 			);
 
 			expect(result).toMatchObject({
+				ok: false,
+				code: "blocked_conflict",
 				reload: false,
 				message: expect.stringContaining("unmerged"),
 			});
@@ -982,7 +986,7 @@ describe.sequential("PiSyncCommands.push (rebase conflict and --continue)", () =
 				"--continue",
 			);
 
-			expect(result.reload).toBe(true);
+			expect(result).toMatchObject({ ok: true, code: "ok", reload: true });
 
 			// State should no longer have pending operation
 			const state = await loadState(environment.agentDir);
@@ -1026,6 +1030,8 @@ describe.sequential("PiSyncCommands.push (rebase conflict and --continue)", () =
 			);
 
 			expect(result).toMatchObject({
+				ok: false,
+				code: "blocked_conflict",
 				reload: false,
 				message: expect.stringContaining("Worktree is not clean"),
 			});

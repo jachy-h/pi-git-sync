@@ -453,6 +453,56 @@ export async function gitStatus(
 	};
 }
 
+/**
+ * Switch to the configured sync branch, creating a local tracking branch when
+ * only origin/<branch> exists. The caller decides whether to fetch first.
+ */
+export async function ensureConfiguredBranch(
+	repoPath: string,
+	branch: string,
+): Promise<boolean> {
+	const branchFormat = await gitProbe(repoPath, [
+		"check-ref-format",
+		"--branch",
+		branch,
+	]);
+	if (!branchFormat.ok) {
+		throw new Error(`Invalid configured sync branch "${branch}".`);
+	}
+
+	const status = await gitStatus(repoPath);
+	if (status.branch === branch) return false;
+
+	const localRef = await gitProbe(repoPath, [
+		"show-ref",
+		"--verify",
+		`refs/heads/${branch}`,
+	]);
+	if (localRef.ok) {
+		await gitExec(repoPath, ["switch", branch]);
+		return true;
+	}
+
+	const remoteRef = await gitProbe(repoPath, [
+		"show-ref",
+		"--verify",
+		`refs/remotes/origin/${branch}`,
+	]);
+	if (!remoteRef.ok) {
+		throw new Error(
+			`Configured sync branch "${branch}" does not exist locally or on origin.`,
+		);
+	}
+	await gitExec(repoPath, [
+		"switch",
+		"--track",
+		"-c",
+		branch,
+		`origin/${branch}`,
+	]);
+	return true;
+}
+
 // ========== Diff ==========
 
 export async function gitDiff(repoPath: string): Promise<string> {
