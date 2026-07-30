@@ -36,7 +36,7 @@ import {
 	GitCommandError,
 } from "../system/git.ts";
 import { loadPiSyncConfig } from "../sync/config.ts";
-import { withOperationSignal } from "./operation-context.ts";
+import { withOperationSignal } from "../system/operation-context.ts";
 import type { PiSyncConfig } from "../sync/config.ts";
 import { executeApplyTransaction } from "./apply-transaction.ts";
 import { resolveConflictFlow } from "./conflict-flow.ts";
@@ -137,6 +137,11 @@ export interface PushPreparation {
 
 export type LifecycleState =
 	| { kind: "uninitialized" }
+	| {
+			kind: "interrupted_setup";
+			repoPath: string;
+			gitUrl: string;
+	  }
 	| { kind: "initialized"; repoPath: string; state: SyncState }
 	| { kind: "broken"; reason: string; repoPath?: string };
 
@@ -319,14 +324,66 @@ export class PiSyncCommands {
 		const defaultPath = join(this.agentDir, "..", "config-repo");
 
 		if (!state.repoPath) {
-			return existsSync(defaultPath)
-				? {
-						kind: "broken",
-						reason:
-							"A config repository exists, but local sync state is missing.",
-						repoPath: defaultPath,
-					}
-				: { kind: "uninitialized" };
+			if (!existsSync(defaultPath)) return { kind: "uninitialized" };
+			if (!existsSync(join(defaultPath, ".git"))) {
+				return {
+					kind: "broken",
+					reason:
+						"An incomplete config repository exists without a .git directory.",
+					repoPath: defaultPath,
+				};
+			}
+
+			const [origin, status, commitCount] = await Promise.all([
+				gitProbe(defaultPath, ["remote", "get-url", "origin"]),
+				gitProbe(defaultPath, ["status", "--porcelain"]),
+				gitProbe(defaultPath, ["rev-list", "--count", "HEAD"]),
+			]);
+			const gitUrl = origin.stdout.trim();
+			if (!origin.ok || !gitUrl || !status.ok) {
+				return {
+					kind: "broken",
+					reason:
+						"The incomplete config repository is not a usable clone with an origin remote.",
+					repoPath: defaultPath,
+				};
+			}
+
+			const repositoryIsEmpty =
+				!commitCount.ok || parseInt(commitCount.stdout.trim(), 10) === 0;
+			if (!existsSync(join(defaultPath, "pi-sync.json"))) {
+				return repositoryIsEmpty
+					? {
+							kind: "interrupted_setup",
+							repoPath: defaultPath,
+							gitUrl,
+						}
+					: {
+							kind: "broken",
+							reason:
+								"The config repository has commits but is missing pi-sync.json.",
+							repoPath: defaultPath,
+						};
+			}
+
+			try {
+				await loadPiSyncConfig(defaultPath);
+			} catch (error) {
+				return {
+					kind: "broken",
+					reason:
+						error instanceof Error
+							? `The incomplete repository has an invalid pi-sync.json: ${error.message}`
+							: "The incomplete repository has an invalid pi-sync.json.",
+					repoPath: defaultPath,
+				};
+			}
+
+			return {
+				kind: "interrupted_setup",
+				repoPath: defaultPath,
+				gitUrl,
+			};
 		}
 
 		if (!existsSync(state.repoPath)) {
@@ -513,8 +570,15 @@ export class PiSyncCommands {
 			};
 		}
 
-		if (lifecycle.kind === "uninitialized") {
-			if (!options.gitUrl) {
+		if (
+			lifecycle.kind === "uninitialized" ||
+			lifecycle.kind === "interrupted_setup"
+		) {
+			const gitUrl =
+				lifecycle.kind === "interrupted_setup"
+					? lifecycle.gitUrl
+					: options.gitUrl;
+			if (!gitUrl) {
 				return {
 					ok: false,
 					code: "blocked_validation",
@@ -525,13 +589,32 @@ export class PiSyncCommands {
 					details: { needsGitUrl: true },
 				};
 			}
-			const setup = await this.init(
-				options.gitUrl,
-				(message) =>
-					this.emitProgress(options.onProgress, "preflight", message),
-				false,
-				options.packageApproval,
-			);
+			if (lifecycle.kind === "interrupted_setup") {
+				this.emitProgress(
+					options.onProgress,
+					"preflight",
+					"Resuming interrupted setup...",
+				);
+			}
+			const reportSetupProgress = (message: string) =>
+				this.emitProgress(options.onProgress, "preflight", message);
+			const setup =
+				lifecycle.kind === "interrupted_setup"
+					? normalizeInitResult(
+							await this.initFresh(
+								gitUrl,
+								lifecycle.repoPath,
+								reportSetupProgress,
+								false,
+								options.packageApproval,
+							),
+						)
+					: await this.init(
+							gitUrl,
+							reportSetupProgress,
+							false,
+							options.packageApproval,
+						);
 			return {
 				...setup,
 				mode: "setup",

@@ -12,8 +12,9 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, relative } from "node:path";
 import { createHash } from "node:crypto";
-import { normalizePath, isPathAllowed } from "./glob.ts";
+import { BUILTIN_HARD_DENY, normalizePath, isPathAllowed } from "./glob.ts";
 import type { PiSyncConfig } from "./config.ts";
+import { getOperationSignal } from "../system/operation-context.ts";
 import type { SyncState } from "../system/state.ts";
 import {
 	assertNoSymlinkComponents,
@@ -91,61 +92,123 @@ export async function sha256File(filePath: string): Promise<string> {
 
 // ========== 文件枚举 ==========
 
-/**
- * 递归枚举目录中的所有文件
- */
+/** Return the non-glob path prefix that constrains a pattern's matches. */
+function staticGlobPrefix(pattern: string): string {
+	const normalized = pattern.replace(/\\/g, "/").replace(/^\/+/, "");
+	const segments: string[] = [];
+	for (const segment of normalized.split("/")) {
+		if (segment.includes("*") || segment.includes("?")) break;
+		segments.push(segment);
+	}
+	return segments.join("/");
+}
+
+/** True when a pattern excludes the directory and every possible descendant. */
+function excludesEntireTree(relativeDir: string, pattern: string): boolean {
+	const normalized = pattern.replace(/\\/g, "/").replace(/^\/+/, "");
+	if (!normalized.endsWith("/**")) return false;
+	const root = normalized.slice(0, -3).replace(/\/$/, "");
+	if (!root || root.includes("*") || root.includes("?")) return false;
+	return relativeDir === root || relativeDir.startsWith(`${root}/`);
+}
+
+/** Avoid descending into trees that cannot produce an allowed file. */
+function canContainAllowedFile(
+	relativeDir: string,
+	config: PiSyncConfig,
+): boolean {
+	if (
+		[...BUILTIN_HARD_DENY, ...config.exclude].some((pattern) =>
+			excludesEntireTree(relativeDir, pattern),
+		)
+	) {
+		return false;
+	}
+
+	return config.include.some((pattern) => {
+		const prefix = staticGlobPrefix(pattern);
+		return (
+			prefix.length === 0 ||
+			prefix === relativeDir ||
+			prefix.startsWith(`${relativeDir}/`) ||
+			relativeDir.startsWith(`${prefix}/`)
+		);
+	});
+}
+
+/** Recursively enumerate only files that the manifest can manage. */
 async function enumerateFiles(
 	dir: string,
 	baseDir: string,
+	config: PiSyncConfig,
+	signal?: AbortSignal,
 ): Promise<FileEntry[]> {
 	const entries: FileEntry[] = [];
 
 	async function walk(currentDir: string) {
+		signal?.throwIfAborted();
 		if (!existsSync(currentDir)) return;
 
 		let dirEntries;
 		try {
 			dirEntries = await readdir(currentDir, { withFileTypes: true });
 		} catch {
+			signal?.throwIfAborted();
 			return;
 		}
 
 		for (const entry of dirEntries) {
+			signal?.throwIfAborted();
 			const fullPath = join(currentDir, entry.name);
 			const relPath = normalizePath(relative(baseDir, fullPath));
 
 			if (entry.name.startsWith(".") && entry.name !== ".gitignore") {
-				// 跳过隐藏文件（除了 .gitignore）
 				continue;
 			}
 
+			const fileAllowed = isPathAllowed(
+				relPath,
+				config.include,
+				config.exclude,
+			).allowed;
+			const descendantAllowed = canContainAllowedFile(relPath, config);
+
 			if (entry.isSymbolicLink()) {
-				throw new Error(`Refusing to inventory symbolic link: ${fullPath}`);
-			} else if (entry.isDirectory()) {
-				await walk(fullPath);
-			} else if (entry.isFile()) {
-				try {
-					const fileStat = await stat(fullPath);
-					if (relPath === "settings.json") {
-						const rawContent = await readFile(fullPath);
-						entries.push({
-							relativePath: relPath,
-							sha256: sha256(normalizeSettingsForComparison(rawContent)),
-							rawSha256: sha256(rawContent),
-							mode: fileStat.mode & 0o777,
-						});
-					} else {
-						entries.push({
-							relativePath: relPath,
-							sha256: await sha256File(fullPath),
-							mode: fileStat.mode & 0o777,
-						});
-					}
-				} catch {
-					// 跳过无法读取的文件
+				if (fileAllowed || descendantAllowed) {
+					throw new Error(`Refusing to inventory symbolic link: ${fullPath}`);
 				}
+				continue;
 			}
-			// 符号链接被跳过
+			if (entry.isDirectory()) {
+				if (descendantAllowed) await walk(fullPath);
+				continue;
+			}
+			if (!entry.isFile() || !fileAllowed) continue;
+
+			try {
+				const fileStat = await stat(fullPath);
+				signal?.throwIfAborted();
+				if (relPath === "settings.json") {
+					const rawContent = await readFile(fullPath);
+					signal?.throwIfAborted();
+					entries.push({
+						relativePath: relPath,
+						sha256: sha256(normalizeSettingsForComparison(rawContent)),
+						rawSha256: sha256(rawContent),
+						mode: fileStat.mode & 0o777,
+					});
+				} else {
+					entries.push({
+						relativePath: relPath,
+						sha256: await sha256File(fullPath),
+						mode: fileStat.mode & 0o777,
+					});
+					signal?.throwIfAborted();
+				}
+			} catch {
+				signal?.throwIfAborted();
+				// Skip files that cannot be read, preserving existing inventory behavior.
+			}
 		}
 	}
 
@@ -169,14 +232,18 @@ export async function compareFiles(
 	config: PiSyncConfig,
 	state: SyncState,
 ): Promise<InventoryResult> {
+	const signal = getOperationSignal();
+	signal?.throwIfAborted();
 	const safeRepoRoot = await resolveRepoSyncRoot(repoPath, config.root, "read");
 	await assertNoSymlinkComponents(agentDir);
+	signal?.throwIfAborted();
 	const syncRoot = safeRepoRoot.path;
 
-	// 枚举 agent 和 repo 中的所有文件
+	// Apply manifest filtering during traversal so excluded package trees are
+	// never stat'ed or hashed (especially expensive on Windows).
 	const [agentFiles, repoFiles] = await Promise.all([
-		enumerateFiles(agentDir, agentDir),
-		enumerateFiles(syncRoot, syncRoot),
+		enumerateFiles(agentDir, agentDir, config, signal),
+		enumerateFiles(syncRoot, syncRoot, config, signal),
 	]);
 
 	// 构建索引：相对路径 → FileEntry

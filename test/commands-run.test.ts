@@ -5,7 +5,11 @@ import { PiSyncCommands } from "../src/orchestration/commands.ts";
 import { sha256 } from "../src/sync/inventory.ts";
 import { loadState, saveState } from "../src/system/state.ts";
 import { createSyncState } from "./helpers/factories.ts";
-import { createGitFixture, runGit } from "./helpers/git-fixture.ts";
+import {
+	configureGitRepository,
+	createGitFixture,
+	runGit,
+} from "./helpers/git-fixture.ts";
 import { withTestEnvironment } from "./helpers/temp-env.ts";
 
 const config = {
@@ -81,6 +85,73 @@ describe("v0.3 unified command domain contract", () => {
 			expect(result.ok).toBe(false);
 			expect(result.mode).toBe("setup");
 			expect(result.details?.needsGitUrl).toBe(true);
+		});
+	});
+
+	it("resumes an interrupted first setup from the default repository", async () => {
+		await withTestEnvironment(async (environment) => {
+			const remotePath = join(environment.rootDir, "empty-remote.git");
+			const defaultPath = join(environment.agentDir, "..", "config-repo");
+			await runGit(environment.rootDir, [
+				"init",
+				"--bare",
+				"--initial-branch=main",
+				remotePath,
+			]);
+			await runGit(environment.rootDir, ["clone", remotePath, defaultPath]);
+			await configureGitRepository(defaultPath);
+
+			// Simulate the point reported in #1: clone and scaffold exist, but the
+			// operation timed out before repoPath was persisted to local state.
+			await mkdir(join(defaultPath, "sync"), { recursive: true });
+			await writeFile(
+				join(defaultPath, "pi-sync.json"),
+				JSON.stringify(config),
+			);
+			await writeFile(join(defaultPath, "sync/settings.json"), "{}\n");
+			await environment.writeAgentFile(
+				"settings.json",
+				JSON.stringify({ packages: ["npm:@jachy/pi-git-sync"] }),
+			);
+
+			const progress: string[] = [];
+			const result = await runOf(new PiSyncCommands(environment.agentDir), {
+				onProgress: (_phase: string, message: string) => progress.push(message),
+			});
+
+			expect(result.ok).toBe(true);
+			expect(result.mode).toBe("setup");
+			expect(progress).toContain("Resuming interrupted setup...");
+			expect(result.message).not.toContain("Sync state is damaged");
+			expect((await loadState(environment.agentDir)).repoPath).toBe(
+				defaultPath,
+			);
+			expect(
+				(await runGit(defaultPath, ["rev-list", "--count", "HEAD"])).stdout,
+			).toBe("1");
+		});
+	});
+
+	it("does not adopt a non-empty default repository without pi-sync.json", async () => {
+		await withTestEnvironment(async (environment) => {
+			const fixture = await createGitFixture(environment.rootDir);
+			const defaultPath = join(environment.agentDir, "..", "config-repo");
+			await runGit(environment.rootDir, [
+				"clone",
+				fixture.remotePath,
+				defaultPath,
+			]);
+
+			const result = await runOf(new PiSyncCommands(environment.agentDir));
+
+			expect(result).toMatchObject({
+				ok: false,
+				mode: "sync",
+				phase: "preflight",
+			});
+			expect(result.message).toContain(
+				"config repository has commits but is missing pi-sync.json",
+			);
 		});
 	});
 
