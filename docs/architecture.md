@@ -61,9 +61,8 @@ pi-git-sync/
 │   ├── orchestration/        # 公共 façade、流程、事务与结构化结果
 │   │   ├── commands.ts
 │   │   ├── operation-{context,result}.ts
-│   │   ├── setup-flow.ts
-│   │   ├── pull-phase.ts
-│   │   ├── push-phase.ts
+│   │   ├── {setup,pull,push,conflict}-flow.ts
+│   │   ├── {pull,push}-phase.ts
 │   │   └── apply-transaction.ts
 │   ├── sync/                 # 配置比较、校验和双向文件镜像
 │   │   ├── {config,glob,inventory,capture,materialize}.ts

@@ -189,7 +189,7 @@ npm run typecheck
 
 ### Upgrade
 
-v0.5 keeps `pi-sync.json` schema v2 and local state schema v3. No repository migration is required: upgrade the extension, run `/pisync status`, then run `/pisync` normally.
+v0.6 keeps `pi-sync.json` schema v2 and local state schema v3. No repository migration is required: upgrade the extension, run `/pisync status`, then run `/pisync` normally.
 
 See the [upgrade guide](./docs/upgrade.md) for legacy migrations, conflict recovery, and rollback.
 

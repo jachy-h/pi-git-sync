@@ -189,7 +189,7 @@ npm run typecheck
 
 ### 升级
 
-v0.5 保持 `pi-sync.json` schema v2 和本地 state schema v3，不需要迁移仓库：升级扩展后，运行 `/pisync status`，再正常运行 `/pisync` 即可。
+v0.6 保持 `pi-sync.json` schema v2 和本地 state schema v3，不需要迁移仓库：升级扩展后，运行 `/pisync status`，再正常运行 `/pisync` 即可。
 
 旧版本迁移、冲突恢复和回滚说明见[升级指南](./docs/upgrade.md)。
 

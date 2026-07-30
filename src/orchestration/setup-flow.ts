@@ -44,13 +44,7 @@ interface SetupApplyResult {
 	details?: unknown;
 }
 
-export interface SetupFlowOptions {
-	agentDir: string;
-	gitUrl: string;
-	repoPath: string;
-	force: boolean;
-	packageApproval?: PackageApproval;
-	onProgress?: (message: string) => void;
+export interface SetupFlowDependencies {
 	captureInitialLocalConfig: (
 		repoPath: string,
 		config: PiSyncConfig,
@@ -74,6 +68,16 @@ export interface SetupFlowOptions {
 	) => Promise<unknown>;
 }
 
+export interface SetupFlowOptions {
+	agentDir: string;
+	gitUrl: string;
+	repoPath: string;
+	force: boolean;
+	packageApproval?: PackageApproval;
+	onProgress?: (message: string) => void;
+	dependencies: SetupFlowDependencies;
+}
+
 /**
  * Execute first-time setup after the command façade has acquired its lifecycle
  * lock. This phase owns repository preparation and initial application only;
@@ -89,12 +93,15 @@ export async function executeSetupFlow(
 		force,
 		packageApproval,
 		onProgress,
+		dependencies,
+	} = options;
+	const {
 		captureInitialLocalConfig,
 		createRepositoryBaseline,
 		applyCurrent,
 		getDeviceBranchName,
 		pushMainAndDeviceBranches,
-	} = options;
+	} = dependencies;
 
 	try {
 		const lines: string[] = [];

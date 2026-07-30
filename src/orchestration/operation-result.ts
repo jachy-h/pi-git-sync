@@ -101,10 +101,7 @@ export function successResult(
 	return details === undefined ? result : { ...result, details };
 }
 
-export function noopResult(
-	message: string,
-	details?: unknown,
-): CommandResult {
+export function noopResult(message: string, details?: unknown): CommandResult {
 	const result = { ok: true, code: "noop" as const, message, reload: false };
 	return details === undefined ? result : { ...result, details };
 }

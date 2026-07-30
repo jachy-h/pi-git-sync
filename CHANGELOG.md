@@ -2,6 +2,19 @@
 
 All notable changes to `@jachy/pi-git-sync` are documented here.
 
+## [0.6.0] - Unreleased
+
+### Changed
+
+- Reorganized production modules into shallow `orchestration`, `sync`, `system`, and `extension` responsibility directories.
+- Moved complete pull, push preparation/execution, and confirmed conflict-resolution orchestration into dedicated lock-free flows; the command façade retains lifecycle, lock, and Pi-specific dependency boundaries.
+- Consolidated setup dependencies behind a narrow `SetupFlowDependencies` interface and made unreferenced repository-path helpers private.
+
+### Compatibility
+
+- No public command, `pi-sync.json` schema v2, local state schema v3, device-branch, backup, package-approval, or secret-scan behavior change.
+- No repository migration is required. Upgrade the extension, run `/pisync status`, then run `/pisync` normally.
+
 ## [0.5.0] - 2026-07-29
 
 ### Added
@@ -59,5 +72,6 @@ All notable changes to `@jachy/pi-git-sync` are documented here.
 - Legacy pending operations are recovered by the next `/pisync` invocation.
 - See [the upgrade guide](docs/upgrade.md) for migration and rollback notes.
 
+[0.6.0]: https://github.com/jachy-h/pi-git-sync/releases/tag/v0.6.0
 [0.5.0]: https://github.com/jachy-h/pi-git-sync/releases/tag/v0.5.0
 [0.3.0]: https://github.com/jachy-h/pi-git-sync/releases/tag/v0.3.0

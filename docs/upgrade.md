@@ -2,13 +2,17 @@
 
 ## Scope
 
-This guide covers upgrades from `0.4.x` to `0.5.x`, plus the compatible v0.2/v0.3 state migration path retained by current releases.
+This guide covers upgrades through `0.6.x`, plus the compatible v0.2/v0.3 state migration path retained by current releases.
+
+### v0.6 compatibility
+
+v0.6 completes an internal orchestration refactor: pull, push, confirmed conflict resolution, and setup use explicit flow boundaries; the command façade retains lifecycle and lock ownership. It does **not** change the public `/pisync` command, `pi-sync.json` schema v2, local state schema v3, device-branch recovery, package approval, or secret scanning.
+
+No repository conversion, state migration, force push, hard reset, or device-branch cleanup is required. Upgrade the extension, then run `/pisync status` followed by `/pisync` normally. Existing pending conflict or `apply-failed` recovery remains handled by the normal `/pisync` entry point.
 
 ### v0.5 compatibility
 
-v0.5 is an internal orchestration refactor: setup, pull/push integration, apply, and extension progress handling now have explicit phase boundaries. It does **not** change the public `/pisync` command, `pi-sync.json` schema v2, or local state schema v3.
-
-No repository conversion, state migration, force push, hard reset, or device-branch cleanup is required. Upgrade the extension, then run `/pisync status` followed by `/pisync` normally. Existing pending conflict or `apply-failed` recovery remains handled by the normal `/pisync` entry point.
+v0.5 introduced the initial setup, pull/push integration, apply, and extension progress boundaries under the same public command and schema compatibility guarantees.
 
 ## Before upgrading
 
