@@ -35,7 +35,7 @@ agent 文件
 ### 前置要求
 
 - Pi `0.82.1` 或更高版本（Node.js `>=22.19.0`）
-- 已配置 Git 和 GitHub SSH
+- 已安装 Git，并已配置 GitHub SSH 或 HTTPS 凭据
 
 ### 第一台机器
 
@@ -51,7 +51,7 @@ agent 文件
 pi-git-sync 会创建仓库结构、捕获当前配置，然后提交并推送。配置仓库是用户数据，不是 Pi Package；不要在其中执行 `pi install`。
 
 ```text
-<你的仓库>/
+~/.pi/config-repo/
 ├── pi-sync.json       # 同步配置
 └── sync/              # 已同步的 Pi 文件
     ├── settings.json
@@ -86,7 +86,7 @@ pi-git-sync 会创建仓库结构、捕获当前配置，然后提交并推送�
 | 内容 | 位置或行为 |
 | --- | --- |
 | Extensions、Skills、Prompts、Themes | `sync/extensions/`、`sync/skills/`、`sync/prompts/`、`sync/themes/` |
-| `settings.json` | 整文件复制；不做 key 级合并 |
+| `settings.json` | 整文件同步，不做 key 级合并；本机 `file:` package 仅保留在当前设备 |
 | `AGENTS.md`、`SYSTEM.md`、`APPEND_SYSTEM.md`、`keybindings.json` | 复制到 Pi agent 目录 |
 | 第三方 Packages | 在 `sync/settings.json` → `packages[]` 中声明；新增或变更 source 必须审批 |
 
@@ -102,7 +102,7 @@ node_modules/**  **/node_modules/**  .pi-sync/**  **/.env  **/*.pem
 
 隐藏文件（`.gitignore` 除外）会被排除。符号链接会被阻止；pi-git-sync 不会跟随符号链接。
 
-## 配置（`pi-sync.json`）
+## 配置（`~/.pi/config-repo/pi-sync.json`）
 
 ```json
 {
@@ -137,6 +137,8 @@ node_modules/**  **/node_modules/**  .pi-sync/**  **/.env  **/*.pem
 }
 ```
 
+以上是初始化生成的默认配置。过滤优先级：内置 hard deny > `exclude` > `include`。
+
 | 字段 | 用途 |
 | --- | --- |
 | `branch` | setup 与同步使用的共享分支 |
@@ -144,7 +146,7 @@ node_modules/**  **/node_modules/**  .pi-sync/**  **/.env  **/*.pem
 | `include` / `exclude` | `root` 下的 Glob 白名单与排除规则 |
 | `delete` | `tracked`：仓库删除时同步删除；`none`：永不删除 |
 | `pullTimeoutMs` | 每个 pull、fetch 和 rebase 操作的超时（毫秒） |
-| `security.scanSecretsBeforePush` | 推送前扫描暂存文件中的凭据 |
+| `security.scanSecretsBeforePush` | 是否在推送前扫描敏感信息（默认 `true`）；hard deny 始终生效 |
 
 ## 冲突处理
 
@@ -168,7 +170,7 @@ node_modules/**  **/node_modules/**  .pi-sync/**  **/.env  **/*.pem
 ## 安全措施
 
 - 先捕获本机改动，再更新远端；仅远端改动使用 fast-forward。
-- 每次推送前扫描敏感信息。
+- 默认在推送前扫描敏感信息；即使关闭扫描，hard deny 仍然生效。
 - 配置写入是原子的，apply 前会备份。
 - 锁会阻止多个同步同时运行。
 - 路径边界检查会阻止符号链接越界。
@@ -200,9 +202,7 @@ npm run typecheck
 
 ### 升级
 
-v0.6 保持 `pi-sync.json` schema v2 和本地 state schema v3，不需要迁移仓库：升级扩展后，运行 `/pisync status`，再正常运行 `/pisync` 即可。
-
-旧版本迁移、冲突恢复和回滚说明见[升级指南](./docs/upgrade.md)。
+升级扩展后，先运行 `/pisync status`，再正常运行 `/pisync`。迁移、冲突恢复和回滚说明见[升级指南](./docs/upgrade.md)。
 
 ### 发布
 

@@ -35,7 +35,7 @@ If a step fails, syncing stops. A content conflict keeps both sides recoverable 
 ### Requirements
 
 - Pi `0.82.1` or newer (Node.js `>=22.19.0`)
-- Git and SSH configured for GitHub
+- Git installed, with SSH or HTTPS credentials configured for GitHub
 
 ### First machine
 
@@ -51,7 +51,7 @@ If a step fails, syncing stops. A content conflict keeps both sides recoverable 
 pi-git-sync creates the repository layout, captures the current configuration, then commits and pushes it. The repository is user data, not a Pi package: do not run `pi install` inside it.
 
 ```text
-<your-repo>/
+~/.pi/config-repo/
 ├── pi-sync.json       # Sync configuration
 └── sync/              # Synced Pi files
     ├── settings.json
@@ -86,7 +86,7 @@ Install pi-git-sync, run `/pisync`, and enter the same repository URL. Its confi
 | Content | Location or behavior |
 | --- | --- |
 | Extensions, skills, prompts, themes | `sync/extensions/`, `sync/skills/`, `sync/prompts/`, `sync/themes/` |
-| `settings.json` | Whole-file copy; no key-level merge |
+| `settings.json` | Whole-file sync with no key-level merge; machine-local `file:` packages stay on that device |
 | `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, `keybindings.json` | Copied into the Pi agent directory |
 | Third-party packages | Declared in `sync/settings.json` → `packages[]`; new or changed sources need approval |
 
@@ -102,7 +102,7 @@ node_modules/**  **/node_modules/**  .pi-sync/**  **/.env  **/*.pem
 
 Hidden files are excluded except `.gitignore`. Symlinks are blocked; pi-git-sync never follows them.
 
-## Configuration (`pi-sync.json`)
+## Configuration (`~/.pi/config-repo/pi-sync.json`)
 
 ```json
 {
@@ -137,6 +137,8 @@ Hidden files are excluded except `.gitignore`. Symlinks are blocked; pi-git-sync
 }
 ```
 
+This is the default generated configuration. Filtering priority is: built-in hard deny > `exclude` > `include`.
+
 | Field | Purpose |
 | --- | --- |
 | `branch` | The shared branch used by setup and sync |
@@ -144,7 +146,7 @@ Hidden files are excluded except `.gitignore`. Symlinks are blocked; pi-git-sync
 | `include` / `exclude` | Glob allowlist and exclusions under `root` |
 | `delete` | `tracked` deletes files removed from the repository; `none` never deletes |
 | `pullTimeoutMs` | Per-operation pull, fetch, and rebase timeout in milliseconds |
-| `security.scanSecretsBeforePush` | Scan staged files for credentials before push |
+| `security.scanSecretsBeforePush` | Enable secret scanning before push (default: `true`); hard deny always applies |
 
 ## How Conflicts Work
 
@@ -168,7 +170,7 @@ Non-conflicting changes from both sides are retained. Each device also has a per
 ## Safety
 
 - Local changes are captured before remote updates; remote-only changes fast-forward.
-- Secrets are scanned before every push.
+- Secrets are scanned before push by default; hard deny still applies if scanning is disabled.
 - Configuration writes are atomic and backed up before apply.
 - A lock prevents simultaneous sync runs.
 - Path-boundary checks prevent symlink escapes.
@@ -200,9 +202,7 @@ npm run typecheck
 
 ### Upgrade
 
-v0.6 keeps `pi-sync.json` schema v2 and local state schema v3. No repository migration is required: upgrade the extension, run `/pisync status`, then run `/pisync` normally.
-
-See the [upgrade guide](./docs/upgrade.md) for legacy migrations, conflict recovery, and rollback.
+After upgrading, run `/pisync status`, then run `/pisync` normally. See the [upgrade guide](./docs/upgrade.md) for migrations, conflict recovery, and rollback.
 
 ### Publish
 
