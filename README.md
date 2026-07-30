@@ -96,7 +96,8 @@ The built-in deny list cannot be overridden:
 
 ```text
 auth.json  sessions/**  trust.json  models-store.json  npm/**  git/**
-node_modules/**  .pi-sync/**  **/.env  **/*.pem  **/id_rsa  **/id_ed25519
+node_modules/**  **/node_modules/**  .pi-sync/**  **/.env  **/*.pem
+**/id_rsa  **/id_ed25519
 ```
 
 Hidden files are excluded except `.gitignore`. Symlinks are blocked; pi-git-sync never follows them.
@@ -119,7 +120,17 @@ Hidden files are excluded except `.gitignore`. Symlinks are blocked; pi-git-sync
     "prompts/**",
     "themes/**"
   ],
-  "exclude": ["**/.DS_Store", "**/*.tmp", "**/*.log"],
+  "exclude": [
+    "**/.DS_Store",
+    "**/*.tmp",
+    "**/*.log",
+    "extensions/**/.cache/**",
+    "extensions/**/cache/**",
+    "extensions/**/coverage/**",
+    "extensions/**/logs/**",
+    "extensions/**/temp/**",
+    "extensions/**/tmp/**"
+  ],
   "delete": "tracked",
   "pullTimeoutMs": 10000,
   "security": { "scanSecretsBeforePush": true }

@@ -22,6 +22,7 @@ export const BUILTIN_HARD_DENY: readonly string[] = [
   "npm/**",
   "git/**",
   "node_modules/**",
+  "**/node_modules/**",
   ".pi-sync/**",
   "**/.env",
   "**/*.pem",

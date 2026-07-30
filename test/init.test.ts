@@ -206,7 +206,16 @@ describe("PiSyncCommands.run setup flow (end-to-end with a real git remote)", ()
 		const scaffoldConfig = JSON.parse(
 			await readFile(join(localRepoDir, "pi-sync.json"), "utf-8"),
 		) as { exclude: string[] };
-		expect(scaffoldConfig.exclude).toContain("extensions/**/logs/**");
+		expect(scaffoldConfig.exclude).toEqual(
+			expect.arrayContaining([
+				"extensions/**/.cache/**",
+				"extensions/**/cache/**",
+				"extensions/**/coverage/**",
+				"extensions/**/logs/**",
+				"extensions/**/temp/**",
+				"extensions/**/tmp/**",
+			]),
+		);
 		expect(
 			JSON.parse(
 				await readFile(join(localRepoDir, "sync/settings.json"), "utf-8"),

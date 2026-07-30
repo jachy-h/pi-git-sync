@@ -1,6 +1,7 @@
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { runOperation } from "../src/extension/operation-runner.ts";
 import type { FileChangeType, FileComparison } from "../src/sync/inventory.ts";
 import {
 	compareFiles,
@@ -196,6 +197,48 @@ describe.sequential("three-way inventory", () => {
 		});
 	});
 
+	it.each([
+		{
+			name: "nested node_modules from the built-in deny list",
+			relativeDir: "extensions/demo/node_modules",
+			exclude: [],
+		},
+		{
+			name: "nested logs from manifest excludes",
+			relativeDir: "extensions/demo/logs",
+			exclude: ["extensions/**/logs/**"],
+		},
+	])("prunes $name as a complete tree", async ({ relativeDir, exclude }) => {
+		await withTestEnvironment(async (environment) => {
+			const outsideDir = join(environment.rootDir, "outside");
+			const ignoredLink = join(
+				environment.agentDir,
+				relativeDir,
+				"ignored-link",
+			);
+			await mkdir(join(environment.agentDir, relativeDir), { recursive: true });
+			await mkdir(outsideDir, { recursive: true });
+			await writeFile(join(outsideDir, "outside.txt"), "outside", "utf-8");
+			await symlink(
+				outsideDir,
+				ignoredLink,
+				process.platform === "win32" ? "junction" : "dir",
+			);
+			await environment.writeAgentFile("extensions/demo/index.ts", "export {};\n");
+
+			const inventory = await compareFiles(
+				environment.agentDir,
+				environment.repoDir,
+				createPiSyncConfig({ include: ["extensions/**"], exclude }),
+				createSyncState({ repoPath: environment.repoDir }),
+			);
+
+			expect(
+				inventory.comparisons.map(({ relativePath }) => relativePath),
+			).toEqual(["extensions/demo/index.ts"]);
+		});
+	});
+
 	it("stops before inventory work when the operation is cancelled", async () => {
 		await withTestEnvironment(async (environment) => {
 			const controller = new AbortController();
@@ -211,6 +254,62 @@ describe.sequential("three-way inventory", () => {
 					),
 				),
 			).rejects.toMatchObject({ name: "AbortError" });
+		});
+	});
+
+	it("stops an in-flight inventory when the operation watchdog expires", async () => {
+		await withTestEnvironment(async (environment) => {
+			const payload = "x".repeat(16 * 1024);
+			await Promise.all(
+				Array.from({ length: 256 }, (_, index) =>
+					environment.writeAgentFile(
+						`themes/generated/${index}.json`,
+						payload,
+					),
+				),
+			);
+			let inventoryStarted = false;
+			let inventoryCompleted = false;
+
+			const result = await runOperation({
+				execute: ({ signal }) =>
+					withOperationSignal(signal, async () => {
+						inventoryStarted = true;
+						await compareFiles(
+							environment.agentDir,
+							environment.repoDir,
+							createPiSyncConfig({ include: ["themes/**"] }),
+							createSyncState({ repoPath: environment.repoDir }),
+						);
+						inventoryCompleted = true;
+						return {
+							ok: true,
+							code: "ok",
+							message: "Inventory complete.",
+							reload: false,
+							mode: "sync",
+							phase: "complete",
+						};
+					}),
+				host: {
+					formatProgress: (_elapsedMs, message) => message,
+					publishProgress: () => undefined,
+				},
+				runTimeoutMs: 0,
+				commandSettleGraceMs: 100,
+				elapsedRefreshMs: 1000,
+				cancellationNoticeDelayMs: 0,
+			});
+
+			expect(inventoryStarted).toBe(true);
+			expect(result).toMatchObject({
+				ok: false,
+				code: "partial_failure",
+				phase: "preflight",
+			});
+			expect(inventoryCompleted).toBe(false);
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(inventoryCompleted).toBe(false);
 		});
 	});
 

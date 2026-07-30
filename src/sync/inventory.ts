@@ -12,7 +12,12 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, relative } from "node:path";
 import { createHash } from "node:crypto";
-import { BUILTIN_HARD_DENY, normalizePath, isPathAllowed } from "./glob.ts";
+import {
+	BUILTIN_HARD_DENY,
+	isPathAllowed,
+	minimatch,
+	normalizePath,
+} from "./glob.ts";
 import type { PiSyncConfig } from "./config.ts";
 import { getOperationSignal } from "../system/operation-context.ts";
 import type { SyncState } from "../system/state.ts";
@@ -107,9 +112,16 @@ function staticGlobPrefix(pattern: string): string {
 function excludesEntireTree(relativeDir: string, pattern: string): boolean {
 	const normalized = pattern.replace(/\\/g, "/").replace(/^\/+/, "");
 	if (!normalized.endsWith("/**")) return false;
-	const root = normalized.slice(0, -3).replace(/\/$/, "");
-	if (!root || root.includes("*") || root.includes("?")) return false;
-	return relativeDir === root || relativeDir.startsWith(`${root}/`);
+	const treeRootPattern = normalized.slice(0, -3).replace(/\/$/, "");
+	if (!treeRootPattern) return false;
+
+	// Matching the directory against the part before the trailing /** proves
+	// that every child is excluded. Matching the full pattern also handles a
+	// caller that is already below an excluded root.
+	return (
+		minimatch(relativeDir, treeRootPattern) ||
+		minimatch(relativeDir, normalized)
+	);
 }
 
 /** Avoid descending into trees that cannot produce an allowed file. */

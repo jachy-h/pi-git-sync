@@ -46,6 +46,17 @@ describe("glob matching and precedence", () => {
 			reason: "Built-in deny: auth.json",
 		});
 		expect(
+			isPathAllowed(
+				"extensions/demo/node_modules/pkg/index.js",
+				["extensions/**"],
+				[],
+			),
+		).toMatchObject({
+			allowed: false,
+			denied: true,
+			reason: "Built-in deny: **/node_modules/**",
+		});
+		expect(
 			isPathAllowed("extensions/debug.log", ["extensions/**"], ["**/*.log"]),
 		).toMatchObject({
 			allowed: false,
