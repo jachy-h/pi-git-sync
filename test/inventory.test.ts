@@ -224,7 +224,10 @@ describe.sequential("three-way inventory", () => {
 				ignoredLink,
 				process.platform === "win32" ? "junction" : "dir",
 			);
-			await environment.writeAgentFile("extensions/demo/index.ts", "export {};\n");
+			await environment.writeAgentFile(
+				"extensions/demo/index.ts",
+				"export {};\n",
+			);
 
 			const inventory = await compareFiles(
 				environment.agentDir,
@@ -262,10 +265,7 @@ describe.sequential("three-way inventory", () => {
 			const payload = "x".repeat(16 * 1024);
 			await Promise.all(
 				Array.from({ length: 256 }, (_, index) =>
-					environment.writeAgentFile(
-						`themes/generated/${index}.json`,
-						payload,
-					),
+					environment.writeAgentFile(`themes/generated/${index}.json`, payload),
 				),
 			);
 			let inventoryStarted = false;
