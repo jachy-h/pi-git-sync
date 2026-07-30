@@ -21,8 +21,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { PiSyncCommands } from "../src/commands.ts";
-import { loadState } from "../src/state.ts";
+import { PiSyncCommands } from "../src/orchestration/commands.ts";
+import { loadState } from "../src/system/state.ts";
 
 const execFile = promisify(execFileCb);
 

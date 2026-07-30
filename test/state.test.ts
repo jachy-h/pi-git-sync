@@ -15,7 +15,7 @@ import {
 	loadState,
 	saveState,
 	updateState,
-} from "../src/state.ts";
+} from "../src/system/state.ts";
 import { createSyncState } from "./helpers/factories.ts";
 import { withTestEnvironment } from "./helpers/temp-env.ts";
 

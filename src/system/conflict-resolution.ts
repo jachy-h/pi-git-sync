@@ -1,7 +1,7 @@
 import type {
 	AutomaticConflictChoice,
 	SyncConflictRequest,
-} from "./operation-result.ts";
+} from "../orchestration/operation-result.ts";
 import {
 	getGitOperationState,
 	getHeadCommit,

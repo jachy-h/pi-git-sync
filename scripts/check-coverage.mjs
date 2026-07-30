@@ -22,7 +22,12 @@ const minimums = {
 		functions: 88,
 		lines: 80,
 	},
-	"src/commands.ts": { statements: 60, branches: 62, functions: 89, lines: 60 },
+	"src/orchestration/commands.ts": {
+		statements: 60,
+		branches: 62,
+		functions: 89,
+		lines: 60,
+	},
 };
 
 function coverageForFile(label) {
@@ -62,7 +67,7 @@ function coverageFor(label) {
 	if (label === "extension-orchestration") {
 		return combineCoverage(
 			coverageForFile("index.ts"),
-			coverageForFile("src/operation-runner.ts"),
+			coverageForFile("src/extension/operation-runner.ts"),
 		);
 	}
 	return coverageForFile(label);

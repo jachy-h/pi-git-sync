@@ -3,13 +3,13 @@
  *
  * 为各种命令生成格式化的展示输出
  */
-import type { GitStatus } from "./git.ts";
-import type { PackageDiff } from "./packages.ts";
-import type { PiSyncConfig } from "./config.ts";
-import type { SyncState } from "./state.ts";
-import type { FileComparison, InventoryResult } from "./inventory.ts";
-import type { CaptureResult } from "./capture.ts";
-import type { ValidationError } from "./validate.ts";
+import type { GitStatus } from "../system/git.ts";
+import type { PackageDiff } from "../system/packages.ts";
+import type { PiSyncConfig } from "../sync/config.ts";
+import type { SyncState } from "../system/state.ts";
+import type { FileComparison, InventoryResult } from "../sync/inventory.ts";
+import type { CaptureResult } from "../sync/capture.ts";
+import type { ValidationError } from "../sync/validate.ts";
 
 // ========== ANSI 颜色 ==========
 

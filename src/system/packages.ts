@@ -10,10 +10,10 @@ import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import type { PiSyncConfig } from "./config.ts";
-import { getOperationSignal } from "./operation-context.ts";
+import type { PiSyncConfig } from "../sync/config.ts";
+import { getOperationSignal } from "../orchestration/operation-context.ts";
 import { resolveRepoSyncRoot, resolveWithinRoot } from "./path-safety.ts";
-export { isPortablePackageSource } from "./settings-portability.ts";
+export { isPortablePackageSource } from "../sync/settings-portability.ts";
 
 const execFileAsync = promisify(execFileCb);
 

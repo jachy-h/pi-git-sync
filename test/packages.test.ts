@@ -3,8 +3,8 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
-import { getPackageDiff } from "../src/packages.ts";
-import type { PiSyncConfig } from "../src/config.ts";
+import { getPackageDiff } from "../src/system/packages.ts";
+import type { PiSyncConfig } from "../src/sync/config.ts";
 
 function makeV2Config(overrides?: Partial<PiSyncConfig>): PiSyncConfig {
 	return {

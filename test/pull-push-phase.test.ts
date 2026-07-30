@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../src/git.ts", () => ({
+vi.mock("../src/system/git.ts", () => ({
 	gitCommit: vi.fn(),
 	gitFetch: vi.fn(),
 	gitFastForward: vi.fn(),
@@ -16,13 +16,13 @@ import {
 	gitRebase,
 	gitRemoteRefExists,
 	gitStatus,
-} from "../src/git.ts";
+} from "../src/system/git.ts";
 import {
 	commitCapturedChangesBeforePull,
 	integratePulledHead,
 	preparePullWorktree,
-} from "../src/pull-phase.ts";
-import { integrateCommittedPush } from "../src/push-phase.ts";
+} from "../src/orchestration/pull-phase.ts";
+import { integrateCommittedPush } from "../src/orchestration/push-phase.ts";
 
 const pullOptions = {
 	repoPath: "/repo",

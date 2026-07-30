@@ -1,7 +1,7 @@
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { FileChangeType, FileComparison } from "../src/inventory.ts";
+import type { FileChangeType, FileComparison } from "../src/sync/inventory.ts";
 import {
   compareFiles,
   getApplicableFiles,
@@ -9,7 +9,7 @@ import {
   hasBilateralConflicts,
   hasLocalChanges,
   sha256,
-} from "../src/inventory.ts";
+} from "../src/sync/inventory.ts";
 import { createPiSyncConfig, createSyncState } from "./helpers/factories.ts";
 import { withTestEnvironment } from "./helpers/temp-env.ts";
 

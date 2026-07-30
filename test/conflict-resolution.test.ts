@@ -1,11 +1,11 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { PiSyncCommands } from "../src/commands.ts";
-import { resolveAutomaticConflict } from "../src/conflict-resolution.ts";
-import type { SyncConflictRequest } from "../src/operation-result.ts";
-import { sha256 } from "../src/inventory.ts";
-import { saveState } from "../src/state.ts";
+import { PiSyncCommands } from "../src/orchestration/commands.ts";
+import { resolveAutomaticConflict } from "../src/system/conflict-resolution.ts";
+import type { SyncConflictRequest } from "../src/orchestration/operation-result.ts";
+import { sha256 } from "../src/sync/inventory.ts";
+import { saveState } from "../src/system/state.ts";
 import { createSyncState } from "./helpers/factories.ts";
 import { createGitFixture, runGit } from "./helpers/git-fixture.ts";
 import { withTestEnvironment } from "./helpers/temp-env.ts";

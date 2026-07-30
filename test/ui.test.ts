@@ -6,14 +6,14 @@ import {
 	formatSecretsFindings,
 	formatValidationErrors,
 	formatCaptureResult,
-} from "../src/ui.ts";
-import type { GitStatus } from "../src/git.ts";
+} from "../src/extension/ui.ts";
+import type { GitStatus } from "../src/system/git.ts";
 import type {
 	FileComparison,
 	FileEntry,
 	InventoryResult,
-} from "../src/inventory.ts";
-import type { CaptureResult } from "../src/capture.ts";
+} from "../src/sync/inventory.ts";
+import type { CaptureResult } from "../src/sync/capture.ts";
 
 function makeFileEntry(sha256 = "abc", mode = 0o644): FileEntry {
 	return { relativePath: "", sha256, mode };

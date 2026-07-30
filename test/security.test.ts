@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isDenied, scanSecrets, findDeniedFiles } from "../src/security.ts";
+import { isDenied, scanSecrets, findDeniedFiles } from "../src/system/security.ts";
 
 describe("isDenied", () => {
 	it("should deny built-in hard deny files (no extra patterns needed)", () => {

@@ -2,8 +2,8 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { withOperationSignal } from "../src/operation-context.ts";
-import { reconcilePackages } from "../src/packages.ts";
+import { withOperationSignal } from "../src/orchestration/operation-context.ts";
+import { reconcilePackages } from "../src/system/packages.ts";
 import { createPiSyncConfig } from "./helpers/factories.ts";
 import { withTestEnvironment } from "./helpers/temp-env.ts";
 

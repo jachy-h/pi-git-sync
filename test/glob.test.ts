@@ -4,7 +4,7 @@ import {
 	isPathAllowed,
 	minimatch,
 	normalizePath,
-} from "../src/glob.ts";
+} from "../src/sync/glob.ts";
 
 describe("normalizePath", () => {
 	it("normalizes Windows separators, leading dot segments, duplicate separators, and trailing separators", () => {

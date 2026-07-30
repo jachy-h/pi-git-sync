@@ -1,16 +1,16 @@
-import { createBackup, restoreBackup } from "./backup.ts";
-import type { PiSyncConfig } from "./config.ts";
-import { executeMaterialize } from "./materialize.ts";
-import type { MaterializePlan } from "./materialize.ts";
+import { createBackup, restoreBackup } from "../system/backup.ts";
+import type { PiSyncConfig } from "../sync/config.ts";
+import { executeMaterialize } from "../sync/materialize.ts";
+import type { MaterializePlan } from "../sync/materialize.ts";
 import type { CommandResult } from "./operation-result.ts";
-import { executePackagePlan } from "./packages.ts";
+import { executePackagePlan } from "../system/packages.ts";
 import type {
 	PackageApproval,
 	PackagePlan,
 	ReconcileResult,
-} from "./packages.ts";
-import { updateState } from "./state.ts";
-import type { SyncState } from "./state.ts";
+} from "../system/packages.ts";
+import { updateState } from "../system/state.ts";
+import type { SyncState } from "../system/state.ts";
 
 type Backup = Awaited<ReturnType<typeof createBackup>>;
 

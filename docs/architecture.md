@@ -1,7 +1,7 @@
 # pi-git-sync 架构与逻辑文档
 
-> 版本：0.3.x（config schema v2，state schema v3）
-> 最后更新：2026-07-27
+> 版本：0.6.0-dev（config schema v2，state schema v3）
+> 最后更新：2026-07-30
 
 ## 目录
 
@@ -58,28 +58,23 @@ pi-git-sync/
 ├── scripts/
 │   └── bootstrap.sh          # 新机器自举脚本
 ├── src/
-│   ├── commands.ts           # 公共 façade、lifecycle、lock、phase ordering、冲突协调
-│   ├── apply-transaction.ts  # 已批准且无冲突的 backup → materialize → package → state 事务
-│   ├── pull-phase.ts         # 无锁 worktree/capture-commit/fetch/rebase-or-ff 阶段
-│   ├── push-phase.ts         # 无锁 committed-push fetch/rebase 阶段
-│   ├── setup-flow.ts         # 无锁 clone/scaffold/onboarding/initial apply 阶段
-│   ├── operation-runner.ts   # UI-agnostic progress/cancel/watchdog runner
-│   ├── conflict-resolution.ts # local/remote 自动选边 Git 事务
-│   ├── config.ts             # pi-sync.json schema v2 加载 & 校验
-│   ├── inventory.ts          # 三方文件比较引擎（baseline vs local vs remote）
-│   ├── capture.ts            # agent → repo 变更捕获
-│   ├── materialize.ts        # repo → agent 文件写入（原子 + 安全）
-│   ├── git.ts                # Git 操作封装（status/fetch/pull/push/rebase）
-│   ├── backup.ts             # 备份 & 恢复（apply 前完整备份）
-│   ├── lock.ts               # 并发锁（pid 级，含 staleness 检测）
-│   ├── security.ts           # hard deny 列表 + secret scanning
-│   ├── glob.ts               # minimatch glob + 路径规范化 + 安全检查
-│   ├── state.ts              # 同步基线持久化（<config-repo>/.pi-sync/state.json，Git ignored）
-│   ├── packages.ts           # settings.json packages[] 解析、审批、执行与回滚
-│   ├── path-safety.ts        # repo/agent root 与 symlink 边界
-│   ├── operation-result.ts   # 结构化命令结果与 SyncConflictRequest
-│   ├── validate.ts           # JSON / conflict marker / settings 可移植性校验
-│   ├── ui.ts                 # 格式化输出（status/diff/backup/capture）
+│   ├── orchestration/        # 公共 façade、流程、事务与结构化结果
+│   │   ├── commands.ts
+│   │   ├── operation-{context,result}.ts
+│   │   ├── setup-flow.ts
+│   │   ├── pull-phase.ts
+│   │   ├── push-phase.ts
+│   │   └── apply-transaction.ts
+│   ├── sync/                 # 配置比较、校验和双向文件镜像
+│   │   ├── {config,glob,inventory,capture,materialize}.ts
+│   │   ├── settings-portability.ts
+│   │   └── validate.ts
+│   ├── system/               # Git、持久化和本机副作用边界
+│   │   ├── {git,state,backup,lock,packages}.ts
+│   │   ├── {path-safety,security,conflict-resolution}.ts
+│   └── extension/            # Pi/TUI 适配
+│       ├── operation-runner.ts
+│       └── ui.ts
 └── test/
     ├── helpers/              # temp-env, git-fixture, fake-pi, factories
     ├── e2e/                  # 两设备端到端测试（CI 中仅执行一次）
@@ -182,12 +177,12 @@ v2 → v3 迁移会先备份旧 state。只有 local/repo hash 相同的路径�
 
 ```mermaid
 graph TB
-    subgraph "Extension 层"
+    subgraph "extension/"
         index["index.ts<br/>命令注册 · UI 输入/通知"]
         runner["operation-runner.ts<br/>progress · Escape · watchdog"]
     end
 
-    subgraph "Facade 与 phase 层"
+    subgraph "orchestration/"
         commands["commands.ts<br/>lifecycle · lock · phase ordering · conflict"]
         setup["setup-flow.ts"]
         pull["pull-phase.ts"]
@@ -195,12 +190,12 @@ graph TB
         apply["apply-transaction.ts"]
     end
 
-    subgraph "核心引擎与持久化层"
-        git["git.ts"]
-        inventory["inventory.ts / capture.ts / materialize.ts"]
-        state["state.ts / backup.ts / config.ts"]
-        safety["path-safety.ts / security.ts / validate.ts / packages.ts"]
-        lock["lock.ts"]
+    subgraph "sync/ 与 system/"
+        git["system/git.ts"]
+        inventory["sync/inventory.ts / capture.ts / materialize.ts"]
+        state["system/state.ts / backup.ts"]
+        safety["sync/config.ts / validate.ts<br/>system/path-safety.ts / security.ts / packages.ts"]
+        lock["system/lock.ts"]
     end
 
     index --> runner --> commands

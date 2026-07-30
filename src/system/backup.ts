@@ -12,9 +12,9 @@
 import { chmod, mkdir, writeFile, readFile, rename, readdir, unlink, stat, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { sha256File } from "./inventory.ts";
-import { normalizePath } from "./glob.ts";
-import type { MaterializePlan } from "./materialize.ts";
+import { sha256File } from "../sync/inventory.ts";
+import { normalizePath } from "../sync/glob.ts";
+import type { MaterializePlan } from "../sync/materialize.ts";
 import { assertNoSymlinkComponents, resolveWithinRoot } from "./path-safety.ts";
 
 // ========== 类型 ==========

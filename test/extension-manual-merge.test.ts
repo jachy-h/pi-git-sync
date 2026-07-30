@@ -23,7 +23,7 @@ const manualMergeMessage = [
 	"Resolve any conflicts, then run git add, git commit, and git push origin main.",
 ].join("\n");
 
-vi.mock("../src/commands.ts", () => ({
+vi.mock("../src/orchestration/commands.ts", () => ({
 	PiSyncCommands: class {
 		async getConflictRepoPath() {
 			return "/tmp/config-repo";

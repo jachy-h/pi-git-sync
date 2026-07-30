@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { loadPiSyncConfig } from "./config.ts";
+import { loadPiSyncConfig } from "../sync/config.ts";
 import {
 	GitCommandError,
 	gitCommit,
@@ -11,12 +11,12 @@ import {
 	gitProbe,
 	gitPushHeadToBranch,
 	gitRenameBranch,
-} from "./git.ts";
-import type { PiSyncConfig } from "./config.ts";
+} from "../system/git.ts";
+import type { PiSyncConfig } from "../sync/config.ts";
 import type { ResultCode } from "./operation-result.ts";
-import type { PackageApproval } from "./packages.ts";
-import { loadState, updateState } from "./state.ts";
-import type { SyncState } from "./state.ts";
+import type { PackageApproval } from "../system/packages.ts";
+import { loadState, updateState } from "../system/state.ts";
+import type { SyncState } from "../system/state.ts";
 
 export interface SetupFlowResult {
 	message: string;

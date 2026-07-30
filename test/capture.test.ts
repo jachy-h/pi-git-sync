@@ -2,8 +2,8 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { captureChanges, verifyCapture } from "../src/capture.ts";
-import { sha256 } from "../src/inventory.ts";
+import { captureChanges, verifyCapture } from "../src/sync/capture.ts";
+import { sha256 } from "../src/sync/inventory.ts";
 import { createPiSyncConfig, createSyncState } from "./helpers/factories.ts";
 import { withTestEnvironment } from "./helpers/temp-env.ts";
 

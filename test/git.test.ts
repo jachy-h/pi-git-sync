@@ -18,8 +18,8 @@ import {
 	isWorktreeClean,
 	gitExec,
 	GitCommandError,
-} from "../src/git.ts";
-import { withOperationSignal } from "../src/operation-context.ts";
+} from "../src/system/git.ts";
+import { withOperationSignal } from "../src/orchestration/operation-context.ts";
 
 const execAsync = promisify(execCb);
 

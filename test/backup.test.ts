@@ -7,10 +7,10 @@ import {
   getLatestBackup,
   listBackups,
   restoreBackup,
-} from "../src/backup.ts";
-import type { MaterializePlan } from "../src/materialize.ts";
-import { PiSyncCommands } from "../src/commands.ts";
-import { loadState, saveState } from "../src/state.ts";
+} from "../src/system/backup.ts";
+import type { MaterializePlan } from "../src/sync/materialize.ts";
+import { PiSyncCommands } from "../src/orchestration/commands.ts";
+import { loadState, saveState } from "../src/system/state.ts";
 import { createPiSyncConfig, createSyncState } from "./helpers/factories.ts";
 import { runGit } from "./helpers/git-fixture.ts";
 import { withTestEnvironment } from "./helpers/temp-env.ts";

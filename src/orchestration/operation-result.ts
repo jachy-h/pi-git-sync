@@ -1,4 +1,4 @@
-import type { PackageApproval } from "./packages.ts";
+import type { PackageApproval } from "../system/packages.ts";
 
 export type ResultCode =
 	| "ok"

@@ -4,7 +4,7 @@
  * 内置 hard deny 优先级最高，用户无法通过 include 覆盖。
  * Secret scan 在 push 前扫描完整文件和 staged diff。
  */
-import { minimatch, BUILTIN_HARD_DENY } from "./glob.ts";
+import { minimatch, BUILTIN_HARD_DENY } from "../sync/glob.ts";
 
 // ========== Secret 检测模式 ==========
 

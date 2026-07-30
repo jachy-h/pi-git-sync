@@ -1,9 +1,9 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { PiSyncCommands } from "../../src/commands.ts";
-import { sha256 } from "../../src/inventory.ts";
-import { saveState } from "../../src/state.ts";
+import { PiSyncCommands } from "../../src/orchestration/commands.ts";
+import { sha256 } from "../../src/sync/inventory.ts";
+import { saveState } from "../../src/system/state.ts";
 import { createSyncState } from "../helpers/factories.ts";
 import {
 	configureGitRepository,

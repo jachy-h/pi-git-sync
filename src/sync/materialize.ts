@@ -22,21 +22,21 @@ import {
 import { existsSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { randomBytes } from "node:crypto";
-import { isDenied } from "./security.ts";
+import { isDenied } from "../system/security.ts";
 import {
 	hasConflictMarkers,
 	validateJson,
 	validateSettingsPortability,
 } from "./validate.ts";
 import type { PiSyncConfig } from "./config.ts";
-import type { SyncState, BaselineEntry } from "./state.ts";
+import type { SyncState, BaselineEntry } from "../system/state.ts";
 import {
 	compareFiles,
 	getApplicableFiles,
 	sha256File,
 	type FileComparison,
 } from "./inventory.ts";
-import { resolveRepoSyncRoot, resolveWithinRoot } from "./path-safety.ts";
+import { resolveRepoSyncRoot, resolveWithinRoot } from "../system/path-safety.ts";
 import { mergeLocalPackagesIntoSettings } from "./settings-portability.ts";
 
 // ========== 类型定义 ==========

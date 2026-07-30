@@ -15,7 +15,7 @@ import { readFile, writeFile, mkdir, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { PiSyncConfig } from "./config.ts";
-import type { SyncState } from "./state.ts";
+import type { SyncState } from "../system/state.ts";
 import {
 	compareFiles,
 	getCapturableFiles,
@@ -23,8 +23,8 @@ import {
 	type FileComparison,
 } from "./inventory.ts";
 import { normalizePath, isPathAllowed } from "./glob.ts";
-import { isDenied } from "./security.ts";
-import { resolveRepoSyncRoot, resolveWithinRoot } from "./path-safety.ts";
+import { isDenied } from "../system/security.ts";
+import { resolveRepoSyncRoot, resolveWithinRoot } from "../system/path-safety.ts";
 import { sanitizeSettingsForRepository } from "./settings-portability.ts";
 
 export interface CaptureResult {

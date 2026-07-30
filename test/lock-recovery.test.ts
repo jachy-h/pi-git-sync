@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { SyncLock } from "../src/lock.ts";
+import { SyncLock } from "../src/system/lock.ts";
 import { withTestEnvironment } from "./helpers/temp-env.ts";
 
 describe.sequential("SyncLock recovery and contention", () => {

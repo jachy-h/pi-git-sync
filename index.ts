@@ -21,15 +21,15 @@ import type {
 	ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import { matchesKey, type SelectItem } from "@earendil-works/pi-tui";
-import { PiSyncCommands } from "./src/commands.ts";
-import { runOperation } from "./src/operation-runner.ts";
+import { PiSyncCommands } from "./src/orchestration/commands.ts";
+import { runOperation } from "./src/extension/operation-runner.ts";
 import {
 	isSyncConflictRequest,
 	type ConflictChoice,
 	type RunOptions,
 	type SyncConflictRequest,
 	type RunResult,
-} from "./src/operation-result.ts";
+} from "./src/orchestration/operation-result.ts";
 
 const COMMAND_SETTLE_GRACE_MS = 100;
 const ELAPSED_REFRESH_MS = 1000;

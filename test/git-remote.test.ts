@@ -8,7 +8,7 @@ import {
 	gitFastForward,
 	gitStatus,
 	isDiverged,
-} from "../src/git.ts";
+} from "../src/system/git.ts";
 import { createGitFixture, runGit } from "./helpers/git-fixture.ts";
 import { withTestEnvironment } from "./helpers/temp-env.ts";
 

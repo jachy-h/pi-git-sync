@@ -4,14 +4,14 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extension from "../index.ts";
-import { PiSyncCommands } from "../src/commands.ts";
-import type { RunResult } from "../src/operation-result.ts";
+import { PiSyncCommands } from "../src/orchestration/commands.ts";
+import type { RunResult } from "../src/orchestration/operation-result.ts";
 import {
 	FakeExtensionApi,
 	FakeCommandContext,
 	FakeUi,
 } from "./helpers/fake-pi.ts";
-import { saveState } from "../src/state.ts";
+import { saveState } from "../src/system/state.ts";
 import { createSyncState } from "./helpers/factories.ts";
 import { createGitFixture, runGit } from "./helpers/git-fixture.ts";
 import {
@@ -380,7 +380,7 @@ describe.sequential("Extension push command interaction flow", () => {
 			await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
 			await runGit(fixture.deviceBPath, ["pull", "--ff-only"]);
 
-			const { sha256 } = await import("../src/inventory.ts");
+			const { sha256 } = await import("../src/sync/inventory.ts");
 			await environment.writeAgentFile("prompts/welcome.md", "base\n");
 			await saveState(
 				environment.agentDir,
@@ -430,7 +430,7 @@ describe.sequential("Extension push command interaction flow", () => {
 			await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
 			await runGit(fixture.deviceBPath, ["pull", "--ff-only"]);
 
-			const { sha256 } = await import("../src/inventory.ts");
+			const { sha256 } = await import("../src/sync/inventory.ts");
 			await environment.writeAgentFile("prompts/welcome.md", "base\n");
 			await saveState(
 				environment.agentDir,
@@ -473,7 +473,7 @@ describe.sequential("Extension push command interaction flow", () => {
 			const settings = JSON.stringify({ packages: ["npm:@jachy/pi-git-sync"] });
 			await environment.writeAgentFile("prompts/welcome.md", "base\n");
 			await environment.writeAgentFile("settings.json", settings);
-			const { sha256 } = await import("../src/inventory.ts");
+			const { sha256 } = await import("../src/sync/inventory.ts");
 			await saveState(
 				environment.agentDir,
 				createSyncState({
@@ -761,7 +761,7 @@ describe.sequential("Extension pull command interaction flow", () => {
 				});
 				await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
 				await runGit(fixture.deviceBPath, ["pull", "--ff-only"]);
-				const { sha256 } = await import("../src/inventory.ts");
+				const { sha256 } = await import("../src/sync/inventory.ts");
 				await environment.writeAgentFile("prompts/welcome.md", "base\n");
 				const settings = JSON.stringify({
 					packages: ["npm:@jachy/pi-git-sync"],
@@ -841,7 +841,7 @@ describe.sequential("Extension pull command interaction flow", () => {
 			await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
 			await runGit(fixture.deviceBPath, ["pull", "--ff-only"]);
 
-			const { sha256 } = await import("../src/inventory.ts");
+			const { sha256 } = await import("../src/sync/inventory.ts");
 			await environment.writeAgentFile("prompts/welcome.md", "base\n");
 			const settings = JSON.stringify({ packages: ["npm:@jachy/pi-git-sync"] });
 			await environment.writeAgentFile("settings.json", settings);
@@ -876,7 +876,7 @@ describe.sequential("Extension pull command interaction flow", () => {
 			await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
 			await runGit(fixture.deviceBPath, ["pull", "--ff-only"]);
 			await environment.writeAgentFile("prompts/welcome.md", "base\n");
-			const { sha256 } = await import("../src/inventory.ts");
+			const { sha256 } = await import("../src/sync/inventory.ts");
 			await saveState(
 				environment.agentDir,
 				createSyncState({
@@ -927,7 +927,7 @@ describe.sequential("Extension pull command interaction flow", () => {
 			await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
 			await runGit(fixture.deviceBPath, ["pull", "--ff-only"]);
 			await environment.writeAgentFile("prompts/welcome.md", "base\n");
-			const { sha256 } = await import("../src/inventory.ts");
+			const { sha256 } = await import("../src/sync/inventory.ts");
 			await saveState(
 				environment.agentDir,
 				createSyncState({

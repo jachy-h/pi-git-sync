@@ -2,8 +2,8 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { atomicWrite, executeMaterialize, readAgentFile } from "../src/materialize.ts";
-import type { MaterializePlan } from "../src/materialize.ts";
+import { atomicWrite, executeMaterialize, readAgentFile } from "../src/sync/materialize.ts";
+import type { MaterializePlan } from "../src/sync/materialize.ts";
 import { withTestEnvironment } from "./helpers/temp-env.ts";
 
 function plan(overrides: Partial<MaterializePlan>): MaterializePlan {

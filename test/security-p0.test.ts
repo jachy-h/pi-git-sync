@@ -4,7 +4,7 @@ import {
 	isDenied,
 	scanFilesForSecrets,
 	scanSecrets,
-} from "../src/security.ts";
+} from "../src/system/security.ts";
 
 describe("hard deny P0 regressions", () => {
 	it.each([

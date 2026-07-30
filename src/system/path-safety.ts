@@ -1,7 +1,7 @@
 import { lstat, realpath } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { normalizePath } from "./glob.ts";
+import { normalizePath } from "../sync/glob.ts";
 
 export type PathIntent = "read" | "write" | "delete" | "backup" | "restore";
 

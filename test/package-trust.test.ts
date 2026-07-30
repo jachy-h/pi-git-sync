@@ -1,10 +1,10 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { reconcilePackages } from "../src/packages.ts";
-import { PiSyncCommands } from "../src/commands.ts";
-import { sha256 } from "../src/inventory.ts";
-import { loadState, saveState } from "../src/state.ts";
+import { reconcilePackages } from "../src/system/packages.ts";
+import { PiSyncCommands } from "../src/orchestration/commands.ts";
+import { sha256 } from "../src/sync/inventory.ts";
+import { loadState, saveState } from "../src/system/state.ts";
 import { createPiSyncConfig, createSyncState } from "./helpers/factories.ts";
 import { runGit } from "./helpers/git-fixture.ts";
 import { withTestEnvironment } from "./helpers/temp-env.ts";

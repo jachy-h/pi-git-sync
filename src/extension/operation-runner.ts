@@ -1,4 +1,4 @@
-import type { RunOptions, RunResult, SyncPhase } from "./operation-result.ts";
+import type { RunOptions, RunResult, SyncPhase } from "../orchestration/operation-result.ts";
 
 export interface OperationRunnerHost {
 	formatProgress: (elapsedMs: number, message: string) => string;

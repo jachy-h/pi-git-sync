@@ -14,11 +14,11 @@ import { join, relative } from "node:path";
 import { createHash } from "node:crypto";
 import { normalizePath, isPathAllowed } from "./glob.ts";
 import type { PiSyncConfig } from "./config.ts";
-import type { SyncState } from "./state.ts";
+import type { SyncState } from "../system/state.ts";
 import {
 	assertNoSymlinkComponents,
 	resolveRepoSyncRoot,
-} from "./path-safety.ts";
+} from "../system/path-safety.ts";
 import { normalizeSettingsForComparison } from "./settings-portability.ts";
 
 // ========== 类型定义 ==========

@@ -1,5 +1,5 @@
-import type { PiSyncConfig } from "../../src/config.ts";
-import type { SyncState } from "../../src/state.ts";
+import type { PiSyncConfig } from "../../src/sync/config.ts";
+import type { SyncState } from "../../src/system/state.ts";
 
 export interface PiSyncConfigOverrides
 	extends Omit<Partial<PiSyncConfig>, "security"> {

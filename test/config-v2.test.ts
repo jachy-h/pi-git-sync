@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadPiSyncConfig, validateConfig } from "../src/config.ts";
+import { loadPiSyncConfig, validateConfig } from "../src/sync/config.ts";
 import { withTestEnvironment } from "./helpers/temp-env.ts";
 
 const minimumConfig = {

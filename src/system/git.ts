@@ -12,7 +12,7 @@
  * - gitProbe 用于预期可能失败的探测（如 ls-remote、remote get-url）
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { getOperationSignal } from "./operation-context.ts";
+import { getOperationSignal } from "../orchestration/operation-context.ts";
 
 const MAX_GIT_OUTPUT_BYTES = 20 * 1024 * 1024;
 

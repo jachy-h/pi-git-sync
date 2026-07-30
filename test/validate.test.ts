@@ -6,7 +6,7 @@ import {
   validateFiles,
   validateJson,
   validateSettingsPortability,
-} from "../src/validate.ts";
+} from "../src/sync/validate.ts";
 import { createPiSyncConfig } from "./helpers/factories.ts";
 import { withTestEnvironment } from "./helpers/temp-env.ts";
 

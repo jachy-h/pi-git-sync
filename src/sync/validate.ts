@@ -10,7 +10,7 @@
 import { readFile } from "node:fs/promises";
 import type { PiSyncConfig } from "./config.ts";
 import { normalizePath } from "./glob.ts";
-import { resolveRepoSyncRoot, resolveWithinRoot } from "./path-safety.ts";
+import { resolveRepoSyncRoot, resolveWithinRoot } from "../system/path-safety.ts";
 
 // ========== 校验结果 ==========
 

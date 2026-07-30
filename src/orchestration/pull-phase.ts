@@ -4,8 +4,8 @@ import {
 	gitFetch,
 	gitRebase,
 	gitStatus,
-} from "./git.ts";
-import type { GitStatus } from "./git.ts";
+} from "../system/git.ts";
+import type { GitStatus } from "../system/git.ts";
 
 export interface PullIntegrationPhaseOptions {
 	repoPath: string;

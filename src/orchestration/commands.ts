@@ -34,10 +34,10 @@ import {
 	gitProbe,
 	canFastForward,
 	GitCommandError,
-} from "./git.ts";
-import { loadPiSyncConfig } from "./config.ts";
+} from "../system/git.ts";
+import { loadPiSyncConfig } from "../sync/config.ts";
 import { withOperationSignal } from "./operation-context.ts";
-import type { PiSyncConfig } from "./config.ts";
+import type { PiSyncConfig } from "../sync/config.ts";
 import { executeApplyTransaction } from "./apply-transaction.ts";
 import {
 	commitCapturedChangesBeforePull,
@@ -50,11 +50,11 @@ import {
 	executeSetupFlow,
 	isValidSetupGitUrl,
 } from "./setup-flow.ts";
-import { planMaterialize } from "./materialize.ts";
-import { SyncLock } from "./lock.ts";
-import { scanSecrets } from "./security.ts";
-import { ensureDeviceId, loadState, saveState } from "./state.ts";
-import type { SyncState } from "./state.ts";
+import { planMaterialize } from "../sync/materialize.ts";
+import { SyncLock } from "../system/lock.ts";
+import { scanSecrets } from "../system/security.ts";
+import { ensureDeviceId, loadState, saveState } from "../system/state.ts";
+import type { SyncState } from "../system/state.ts";
 import { isSyncConflictRequest } from "./operation-result.ts";
 import type {
 	CommandResult,
@@ -65,24 +65,24 @@ import type {
 	SyncConflictRequest,
 	SyncPhase,
 } from "./operation-result.ts";
-import { captureChanges } from "./capture.ts";
-import { resolveAutomaticConflict } from "./conflict-resolution.ts";
-import { compareFiles, hasLocalChanges, sha256 } from "./inventory.ts";
-import { validateFiles } from "./validate.ts";
+import { captureChanges } from "../sync/capture.ts";
+import { resolveAutomaticConflict } from "../system/conflict-resolution.ts";
+import { compareFiles, hasLocalChanges, sha256 } from "../sync/inventory.ts";
+import { validateFiles } from "../sync/validate.ts";
 import {
 	getPackageDiff,
 	preparePackagePlan,
 	approvePackagePlan,
-} from "./packages.ts";
-import type { PackageApproval } from "./packages.ts";
-import { resolveRepoSyncRoot, resolveWithinRoot } from "./path-safety.ts";
+} from "../system/packages.ts";
+import type { PackageApproval } from "../system/packages.ts";
+import { resolveRepoSyncRoot, resolveWithinRoot } from "../system/path-safety.ts";
 import {
 	formatGitStatus,
 	formatSyncStatusV2,
 	formatComparisonDiff,
 	formatSecretsFindings,
 	formatValidationErrors,
-} from "./ui.ts";
+} from "../extension/ui.ts";
 
 // ========== 路径工具 ==========
 
@@ -2606,7 +2606,7 @@ export class PiSyncCommands {
 			const safeRoot = await resolveRepoSyncRoot(rp, config.root, "read");
 			const syncRoot = safeRoot.path;
 			const { readdir: rd } = await import("node:fs/promises");
-			const { isPathAllowed } = await import("./glob.ts");
+			const { isPathAllowed } = await import("../sync/glob.ts");
 
 			async function walk(dir: string): Promise<void> {
 				if (!existsSync(dir)) return;

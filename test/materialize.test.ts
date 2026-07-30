@@ -9,9 +9,9 @@ import {
 	planMaterialize,
 	executeMaterialize,
 	readAgentFile,
-} from "../src/materialize.ts";
-import type { PiSyncConfig } from "../src/config.ts";
-import type { SyncState } from "../src/state.ts";
+} from "../src/sync/materialize.ts";
+import type { PiSyncConfig } from "../src/sync/config.ts";
+import type { SyncState } from "../src/system/state.ts";
 
 function makeV2Config(overrides?: Partial<PiSyncConfig>): PiSyncConfig {
 	return {

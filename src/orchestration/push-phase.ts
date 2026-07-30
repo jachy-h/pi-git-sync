@@ -1,4 +1,4 @@
-import { gitFetch, gitRebase, gitRemoteRefExists } from "./git.ts";
+import { gitFetch, gitRebase, gitRemoteRefExists } from "../system/git.ts";
 
 export interface PushIntegrationPhaseOptions {
 	repoPath: string;

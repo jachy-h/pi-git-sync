@@ -3,7 +3,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
-import { SyncLock } from "../src/lock.ts";
+import { SyncLock } from "../src/system/lock.ts";
 
 describe("SyncLock", () => {
 	let syncDir: string;
