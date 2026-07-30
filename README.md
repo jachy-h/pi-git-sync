@@ -6,17 +6,64 @@ Keep the same Pi setup on every machine.
 
 📖 [中文文档](./README.zh.md)
 
----
-
-pi-git-sync stores your Pi configuration in one private GitHub repository. It syncs extensions, skills, prompts, themes, settings, and agent instructions.
+pi-git-sync stores Pi configuration in a private Git repository and synchronizes it across machines.
 
 ```text
-first machine                                      another machine
-
-Pi configuration ── /pisync ──> private Git repo ── /pisync ──> Pi configuration
+Machine A ── /pisync ──> Private Git repo <── /pisync ── Machine B
 ```
 
-Run `/pisync` whenever you change your configuration. It protects local work before it updates from the remote repository.
+## 1. Quick Start
+
+### Requirements and setup
+
+- Pi `0.82.1` or newer (Node.js `>=22.19.0`)
+- Git installed, with SSH or HTTPS credentials configured for GitHub
+
+On the first machine:
+
+1. Create an **empty private** GitHub repository. Do not initialize it with a README.
+2. Install the extension:
+
+   ```bash
+   pi install npm:@jachy/pi-git-sync
+   ```
+
+3. Run `/pisync` and enter the repository URL.
+
+On another machine, install the extension and run `/pisync` with the same URL. The repository is user data, not a Pi package—do not run `pi install` inside it.
+
+### Daily use
+
+| Command | Purpose |
+| --- | --- |
+| `/pisync` | Set up a machine or run a complete sync |
+| `/pisync status` | Show Git and three-way sync status |
+| `/pisync diff` | Preview pending differences |
+
+Run `/pisync` after changing Pi configuration. Press `Esc` to cancel an active run and terminate its Git/SSH subprocesses.
+
+### Sync scope
+
+| Content | Behavior |
+| --- | --- |
+| Extensions, skills, prompts, themes | Synced from their matching directories under `sync/` |
+| `settings.json` | Whole-file sync; machine-local `file:` packages stay on that device |
+| `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, `keybindings.json` | Copied into the Pi agent directory |
+| Third-party packages | Declared in `settings.json`; new or changed sources require approval |
+
+These paths are always blocked:
+
+```text
+auth.json  sessions/**  trust.json  models-store.json  npm/**  git/**
+node_modules/**  **/node_modules/**  .pi-sync/**  **/.env  **/*.pem
+**/id_rsa  **/id_ed25519
+```
+
+Hidden files are excluded except `.gitignore`. Symlinks are never followed.
+
+## 2. Learn More
+
+### Synchronization model
 
 ```text
 agent files
@@ -28,27 +75,11 @@ agent files
    └─ push the shared branch and this device's recovery branch
 ```
 
-If a step fails, syncing stops. A content conflict keeps both sides recoverable instead of silently overwriting a file.
+A failed step stops the run. Files are never silently overwritten when both sides changed.
 
-## Get Started
+### Repository and configuration
 
-### Requirements
-
-- Pi `0.82.1` or newer (Node.js `>=22.19.0`)
-- Git installed, with SSH or HTTPS credentials configured for GitHub
-
-### First machine
-
-1. Create an **empty private** GitHub repository. Do not initialize it with a README.
-2. Install the extension:
-
-   ```bash
-   pi install npm:@jachy/pi-git-sync
-   ```
-
-3. Run `/pisync` in Pi and enter the repository URL.
-
-pi-git-sync creates the repository layout, captures the current configuration, then commits and pushes it. The repository is user data, not a Pi package: do not run `pi install` inside it.
+The repository is cloned locally to:
 
 ```text
 ~/.pi/config-repo/
@@ -61,48 +92,7 @@ pi-git-sync creates the repository layout, captures the current configuration, t
     └── themes/
 ```
 
-### Another machine
-
-Install pi-git-sync, run `/pisync`, and enter the same repository URL. Its configuration is applied to that Pi installation.
-
-### Daily use
-
-```bash
-/pisync
-```
-
-`Esc` cancels an active run and terminates its Git/SSH subprocesses. A run also stops after 60 seconds; `pullTimeoutMs` controls the timeout for each pull, fetch, and rebase operation.
-
-## Commands
-
-| Command | Purpose |
-| --- | --- |
-| `/pisync` | Set up a machine or run the complete sync |
-| `/pisync status` | Show Git and three-way sync status |
-| `/pisync diff` | Show pending differences between Pi and the repository |
-
-## What Gets Synced
-
-| Content | Location or behavior |
-| --- | --- |
-| Extensions, skills, prompts, themes | `sync/extensions/`, `sync/skills/`, `sync/prompts/`, `sync/themes/` |
-| `settings.json` | Whole-file sync with no key-level merge; machine-local `file:` packages stay on that device |
-| `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, `keybindings.json` | Copied into the Pi agent directory |
-| Third-party packages | Declared in `sync/settings.json` → `packages[]`; new or changed sources need approval |
-
-## What Never Gets Synced
-
-The built-in deny list cannot be overridden:
-
-```text
-auth.json  sessions/**  trust.json  models-store.json  npm/**  git/**
-node_modules/**  **/node_modules/**  .pi-sync/**  **/.env  **/*.pem
-**/id_rsa  **/id_ed25519
-```
-
-Hidden files are excluded except `.gitignore`. Symlinks are blocked; pi-git-sync never follows them.
-
-## Configuration (`~/.pi/config-repo/pi-sync.json`)
+Default `~/.pi/config-repo/pi-sync.json`:
 
 ```json
 {
@@ -137,58 +127,32 @@ Hidden files are excluded except `.gitignore`. Symlinks are blocked; pi-git-sync
 }
 ```
 
-This is the default generated configuration. Filtering priority is: built-in hard deny > `exclude` > `include`.
+- Filtering priority: built-in hard deny > `exclude` > `include`.
+- `delete: "tracked"` propagates deletion only for managed files; `"none"` disables deletion.
+- `pullTimeoutMs` controls each pull, fetch, and rebase operation. A complete `/pisync` run stops after 60 seconds.
+- Secret scanning is enabled by default. Built-in hard deny remains active if scanning is disabled.
 
-| Field | Purpose |
-| --- | --- |
-| `branch` | The shared branch used by setup and sync |
-| `root` | Directory in the repository that holds synced files |
-| `include` / `exclude` | Glob allowlist and exclusions under `root` |
-| `delete` | `tracked` deletes files removed from the repository; `none` never deletes |
-| `pullTimeoutMs` | Per-operation pull, fetch, and rebase timeout in milliseconds |
-| `security.scanSecretsBeforePush` | Enable secret scanning before push (default: `true`); hard deny always applies |
-
-## How Conflicts Work
-
-Every sync compares the last synced version, the local Pi files, and the repository files.
+### Conflicts and safety
 
 ```text
-                 changed only here
-baseline ─────┬────────────────────> continue automatically
-              │
-              └── same file changed locally and remotely ──> ask before changing it
+                 changed on one side ──> continue automatically
+baseline ────────┤
+                 changed on both sides ─> ask before applying
 ```
 
-For a real content conflict, choose one of the following:
+For a content conflict, ask the current Pi agent to merge, choose local or remote content for the conflicted paths, or stop and merge manually. Non-conflicting changes and each device's recovery branch remain available.
 
-- Ask the current Pi agent to merge it.
-- Abort and merge manually.
-- Use local or remote content for only the conflicted paths.
+Additional safeguards include atomic writes, pre-apply backups, operation locking, path-boundary checks, package approval, and rollback attempts after failed installs.
 
-Non-conflicting changes from both sides are retained. Each device also has a persistent recovery branch, so unresolved local changes remain available.
-
-## Safety
-
-- Local changes are captured before remote updates; remote-only changes fast-forward.
-- Secrets are scanned before push by default; hard deny still applies if scanning is disabled.
-- Configuration writes are atomic and backed up before apply.
-- A lock prevents simultaneous sync runs.
-- Path-boundary checks prevent symlink escapes.
-- Remote package changes need explicit approval; failed installs attempt rollback.
-
-## Development
-
-### Load locally
+### Development
 
 ```bash
+# Load locally, then run /reload in Pi
 ln -s $(pwd) ~/.pi/agent/extensions/pi-git-sync
-# Then run /reload in Pi.
 
-# Or load temporarily without changing settings.json:
+# Or load temporarily
 pi -e ./index.ts
 ```
-
-### Test
 
 ```bash
 npm install
@@ -197,20 +161,9 @@ npm run test:core  # core suite without E2E
 npm run test:e2e   # two-device E2E suite
 npm run test:smoke # quick glob and UI checks
 npm run test:ci    # typecheck, coverage gate, and E2E
-npm run typecheck
 ```
 
-### Upgrade
-
-After upgrading, run `/pisync status`, then run `/pisync` normally. See the [upgrade guide](./docs/upgrade.md) for migrations, conflict recovery, and rollback.
-
-### Publish
-
-```bash
-npm run pub        # patch version
-npm run pub:minor  # minor version
-npm run pub:major  # major version
-```
+After upgrading, run `/pisync status`, then `/pisync`. See the [upgrade guide](./docs/upgrade.md) for migrations, conflict recovery, and rollback.
 
 ## License
 

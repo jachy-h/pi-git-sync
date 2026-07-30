@@ -6,17 +6,64 @@
 
 📖 [English](./README.md)
 
----
-
-pi-git-sync 将 Pi 配置保存在一个私有 GitHub 仓库中，可同步扩展、技能、提示模板、主题、设置和 agent 指令。
+pi-git-sync 将 Pi 配置保存在私有 Git 仓库中，并在多台机器之间同步。
 
 ```text
-第一台机器                                      另一台机器
-
-Pi 配置 ── /pisync ──> 私有 Git 仓库 ── /pisync ──> Pi 配置
+机器 A ── /pisync ──> 私有 Git 仓库 <── /pisync ── 机器 B
 ```
 
-每次修改配置后执行 `/pisync`。它会先保护本机改动，再从远端更新。
+## 1. 快速开始
+
+### 环境与初始化
+
+- Pi `0.82.1` 或更高版本（Node.js `>=22.19.0`）
+- 已安装 Git，并已配置 GitHub SSH 或 HTTPS 凭据
+
+在第一台机器上：
+
+1. 创建一个**空的私有** GitHub 仓库，不要初始化 README。
+2. 安装扩展：
+
+   ```bash
+   pi install npm:@jachy/pi-git-sync
+   ```
+
+3. 运行 `/pisync`，输入仓库 URL。
+
+在其他机器上安装扩展，并使用同一 URL 运行 `/pisync`。配置仓库是用户数据，不是 Pi Package，请勿在其中执行 `pi install`。
+
+### 日常使用
+
+| 命令 | 用途 |
+| --- | --- |
+| `/pisync` | 初始化或执行完整同步 |
+| `/pisync status` | 查看 Git 与三方同步状态 |
+| `/pisync diff` | 预览待处理差异 |
+
+修改 Pi 配置后运行 `/pisync`。按 `Esc` 可取消同步并终止其 Git/SSH 子进程。
+
+### 同步范围
+
+| 内容 | 行为 |
+| --- | --- |
+| Extensions、Skills、Prompts、Themes | 从 `sync/` 下对应目录同步 |
+| `settings.json` | 整文件同步；本机 `file:` package 仅保留在当前设备 |
+| `AGENTS.md`、`SYSTEM.md`、`APPEND_SYSTEM.md`、`keybindings.json` | 复制到 Pi agent 目录 |
+| 第三方 Packages | 在 `settings.json` 中声明；新增或变更 source 必须审批 |
+
+以下路径始终禁止同步：
+
+```text
+auth.json  sessions/**  trust.json  models-store.json  npm/**  git/**
+node_modules/**  **/node_modules/**  .pi-sync/**  **/.env  **/*.pem
+**/id_rsa  **/id_ed25519
+```
+
+隐藏文件（`.gitignore` 除外）会被排除，符号链接不会被跟随。
+
+## 2. 了解更多
+
+### 同步模型
 
 ```text
 agent 文件
@@ -25,30 +72,14 @@ agent 文件
    ├─ 获取配置分支
    ├─ 对本地提交 rebase，或对仅远端改动 fast-forward
    ├─ 将结果应用到 Pi
-   └─ 推送共享分支与本机恢复分支
+   └─ 推送共享分支与当前设备的恢复分支
 ```
 
-任一步失败都会停止同步。内容冲突会保留双方改动，不会静默覆盖文件。
+任一步失败都会停止同步。双方都修改过的文件不会被静默覆盖。
 
-## 开始使用
+### 仓库与配置
 
-### 前置要求
-
-- Pi `0.82.1` 或更高版本（Node.js `>=22.19.0`）
-- 已安装 Git，并已配置 GitHub SSH 或 HTTPS 凭据
-
-### 第一台机器
-
-1. 在 GitHub 创建一个**空的私有**仓库，不要初始化 README。
-2. 安装扩展：
-
-   ```bash
-   pi install npm:@jachy/pi-git-sync
-   ```
-
-3. 在 Pi 中运行 `/pisync`，按提示输入仓库 URL。
-
-pi-git-sync 会创建仓库结构、捕获当前配置，然后提交并推送。配置仓库是用户数据，不是 Pi Package；不要在其中执行 `pi install`。
+仓库会克隆到本地：
 
 ```text
 ~/.pi/config-repo/
@@ -61,48 +92,7 @@ pi-git-sync 会创建仓库结构、捕获当前配置，然后提交并推送�
     └── themes/
 ```
 
-### 另一台机器
-
-安装 pi-git-sync 后运行 `/pisync`，输入同一个仓库 URL。仓库中的配置会应用到这台 Pi。
-
-### 日常使用
-
-```bash
-/pisync
-```
-
-按 `Esc` 可取消正在运行的同步，并终止其 Git/SSH 子进程。一次同步最多运行 60 秒；`pullTimeoutMs` 控制每个 pull、fetch 和 rebase 操作的超时时间。
-
-## 命令
-
-| 命令 | 用途 |
-| --- | --- |
-| `/pisync` | 设置机器或执行完整同步 |
-| `/pisync status` | 查看 Git 与三方同步状态 |
-| `/pisync diff` | 查看 Pi 与仓库之间的待处理差异 |
-
-## 同步内容
-
-| 内容 | 位置或行为 |
-| --- | --- |
-| Extensions、Skills、Prompts、Themes | `sync/extensions/`、`sync/skills/`、`sync/prompts/`、`sync/themes/` |
-| `settings.json` | 整文件同步，不做 key 级合并；本机 `file:` package 仅保留在当前设备 |
-| `AGENTS.md`、`SYSTEM.md`、`APPEND_SYSTEM.md`、`keybindings.json` | 复制到 Pi agent 目录 |
-| 第三方 Packages | 在 `sync/settings.json` → `packages[]` 中声明；新增或变更 source 必须审批 |
-
-## 永不同步的内容
-
-以下内置 deny list 不可覆盖：
-
-```text
-auth.json  sessions/**  trust.json  models-store.json  npm/**  git/**
-node_modules/**  **/node_modules/**  .pi-sync/**  **/.env  **/*.pem
-**/id_rsa  **/id_ed25519
-```
-
-隐藏文件（`.gitignore` 除外）会被排除。符号链接会被阻止；pi-git-sync 不会跟随符号链接。
-
-## 配置（`~/.pi/config-repo/pi-sync.json`）
+默认的 `~/.pi/config-repo/pi-sync.json`：
 
 ```json
 {
@@ -137,58 +127,32 @@ node_modules/**  **/node_modules/**  .pi-sync/**  **/.env  **/*.pem
 }
 ```
 
-以上是初始化生成的默认配置。过滤优先级：内置 hard deny > `exclude` > `include`。
+- 过滤优先级：内置 hard deny > `exclude` > `include`。
+- `delete: "tracked"` 只传播已管理文件的删除；`"none"` 不传播删除。
+- `pullTimeoutMs` 控制每次 pull、fetch 和 rebase；完整 `/pisync` 最多运行 60 秒。
+- 敏感信息扫描默认启用；关闭扫描后，内置 hard deny 仍然生效。
 
-| 字段 | 用途 |
-| --- | --- |
-| `branch` | setup 与同步使用的共享分支 |
-| `root` | 仓库中存放同步文件的目录 |
-| `include` / `exclude` | `root` 下的 Glob 白名单与排除规则 |
-| `delete` | `tracked`：仓库删除时同步删除；`none`：永不删除 |
-| `pullTimeoutMs` | 每个 pull、fetch 和 rebase 操作的超时（毫秒） |
-| `security.scanSecretsBeforePush` | 是否在推送前扫描敏感信息（默认 `true`）；hard deny 始终生效 |
-
-## 冲突处理
-
-每次同步都会比较上次同步版本、本机 Pi 文件和仓库文件。
+### 冲突与安全
 
 ```text
-                 仅一侧修改
-基线 ────────┬────────────────────> 自动继续
-             │
-             └── 本机与远端修改同一文件 ──> 询问后再处理
+                 仅一侧修改 ──> 自动继续
+基线 ───────────┤
+                 双方都修改 ──> 应用前询问
 ```
 
-发生真实内容冲突时，可选择：
+发生内容冲突时，可以让当前 Pi agent 协助合并、仅对冲突路径选择本机或远端内容，或停止后手动合并。双方的非冲突改动和每台设备的恢复分支都会保留。
 
-- 让当前 Pi agent 协助合并；
-- 中止后手动合并；
-- 仅对冲突路径使用本机或远端内容。
+其他保护包括原子写入、apply 前备份、操作锁、路径边界检查、package 审批，以及安装失败后的回滚尝试。
 
-双方的非冲突改动都会保留。每台设备还有一个持久恢复分支，因此未解决的本机改动仍可恢复。
-
-## 安全措施
-
-- 先捕获本机改动，再更新远端；仅远端改动使用 fast-forward。
-- 默认在推送前扫描敏感信息；即使关闭扫描，hard deny 仍然生效。
-- 配置写入是原子的，apply 前会备份。
-- 锁会阻止多个同步同时运行。
-- 路径边界检查会阻止符号链接越界。
-- 远端 package 变更必须明确审批；安装失败会尝试回滚。
-
-## 开发
-
-### 本地加载
+### 开发
 
 ```bash
+# 本地加载，然后在 Pi 中运行 /reload
 ln -s $(pwd) ~/.pi/agent/extensions/pi-git-sync
-# 然后在 Pi 中执行 /reload。
 
-# 或临时加载，不修改 settings.json：
+# 或临时加载
 pi -e ./index.ts
 ```
-
-### 测试
 
 ```bash
 npm install
@@ -197,20 +161,9 @@ npm run test:core  # 不含 E2E 的核心测试
 npm run test:e2e   # 双设备 E2E 测试
 npm run test:smoke # 快速 glob 与 UI 检查
 npm run test:ci    # 类型检查、覆盖率门禁和 E2E
-npm run typecheck
 ```
 
-### 升级
-
-升级扩展后，先运行 `/pisync status`，再正常运行 `/pisync`。迁移、冲突恢复和回滚说明见[升级指南](./docs/upgrade.md)。
-
-### 发布
-
-```bash
-npm run pub        # patch 版本
-npm run pub:minor  # minor 版本
-npm run pub:major  # major 版本
-```
+升级后先运行 `/pisync status`，再运行 `/pisync`。迁移、冲突恢复和回滚说明见[升级指南](./docs/upgrade.md)。
 
 ## License
 
