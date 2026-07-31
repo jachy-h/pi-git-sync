@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extension from "../index.ts";
+import { SyncStatus } from "../src/extension/status-manager.ts";
 import { PiSyncCommands } from "../src/orchestration/commands.ts";
 import type { RunResult } from "../src/orchestration/operation-result.ts";
 import {
@@ -96,6 +97,8 @@ const config = {
 	security: { scanSecretsBeforePush: false },
 } as const;
 
+const noStatusUpdates: never[] = [];
+
 async function seedConfigRepo(
 	repoPath: string,
 	configOverride: Record<string, unknown> = config,
@@ -161,15 +164,6 @@ describe("Extension registration", () => {
 		).toBeNull();
 	});
 
-	it("registers debug:clear-repo command", () => {
-		const api = new FakeExtensionApi();
-		register(api);
-
-		const cmd = api.commands.get("debug:clear-repo");
-		expect(cmd).toBeDefined();
-		expect(typeof cmd!.handler).toBe("function");
-	});
-
 	it("registers session_start and session_shutdown event handlers", () => {
 		const api = new FakeExtensionApi();
 		register(api);
@@ -178,24 +172,86 @@ describe("Extension registration", () => {
 		expect(api.eventHandlers.has("session_shutdown")).toBe(true);
 	});
 
-	it("clears pi-sync status on session_start and session_shutdown", async () => {
+	it("checks sync in the background before updating its status", async () => {
+		let resolveCheck!: (needsSync: boolean) => void;
+		const checkPromise = new Promise<boolean>((resolve) => {
+			resolveCheck = resolve;
+		});
+		const check = vi
+			.spyOn(PiSyncCommands.prototype, "needsSync")
+			.mockReturnValue(checkPromise);
 		const api = new FakeExtensionApi();
 		register(api);
 		const ctx = new FakeCommandContext();
 
 		await api.emit("session_start", {}, ctx);
-		expect(
-			ctx.ui.statusUpdates.some(
-				(s) => s.key === "pi-sync" && s.value === undefined,
-			),
-		).toBe(true);
+		expect(ctx.ui.statusUpdates).toEqual([]);
+		expect(ctx.ui.notifications).toEqual([]);
 
+		resolveCheck(true);
+		await checkPromise;
+		await Promise.resolve();
+		expect(ctx.ui.statusUpdates).toEqual([
+			{ key: "pi-sync", value: SyncStatus.SyncNeeded },
+		]);
+		expect(ctx.ui.notifications).toEqual([]);
+		check.mockRestore();
+	});
+
+	it("clears Sync needed after a successful sync", async () => {
+		const check = vi
+			.spyOn(PiSyncCommands.prototype, "needsSync")
+			.mockResolvedValue(true);
+		const run = vi.spyOn(PiSyncCommands.prototype, "run").mockResolvedValue({
+			ok: true,
+			code: "ok",
+			message: "Sync completed.",
+			reload: false,
+			mode: "sync",
+			phase: "complete",
+		});
+		try {
+			const api = new FakeExtensionApi();
+			register(api);
+			const ctx = new FakeCommandContext();
+
+			await api.emit("session_start", {}, ctx);
+			await Promise.resolve();
+			await api.commands.get("pisync")!.handler(undefined, ctx);
+
+			expect(ctx.ui.statusUpdates).toEqual([
+				{ key: "pi-sync", value: SyncStatus.SyncNeeded },
+				{ key: "pi-sync", value: undefined },
+			]);
+		} finally {
+			check.mockRestore();
+			run.mockRestore();
+		}
+	});
+
+	it("ignores a completed background check after session shutdown", async () => {
+		let resolveCheck!: (needsSync: boolean) => void;
+		const checkPromise = new Promise<boolean>((resolve) => {
+			resolveCheck = resolve;
+		});
+		const check = vi
+			.spyOn(PiSyncCommands.prototype, "needsSync")
+			.mockReturnValue(checkPromise);
+		const api = new FakeExtensionApi();
+		register(api);
+		const ctx = new FakeCommandContext();
+
+		await api.emit("session_start", {}, ctx);
 		await api.emit("session_shutdown", {}, ctx);
-		expect(
-			ctx.ui.statusUpdates.filter(
-				(s) => s.key === "pi-sync" && s.value === undefined,
-			).length,
-		).toBe(2);
+		resolveCheck(true);
+		await checkPromise;
+		await Promise.resolve();
+
+		expect(ctx.ui.statusUpdates).toEqual([
+			{ key: "pi-sync", value: undefined },
+		]);
+		expect(ctx.ui.notifications).toEqual([]);
+		check.mockRestore();
 	});
 });
 
@@ -211,6 +267,7 @@ describe("pisync command routing", () => {
 		expect(ctx.ui.selectCalls).toHaveLength(0);
 		expect(ctx.ui.inputCalls).toHaveLength(1);
 		expect(notificationTextOf(ctx)).toContain("Setup cancelled.");
+		expect(ctx.ui.statusUpdates).toEqual(noStatusUpdates);
 	});
 
 	it("rejects unknown arguments without side effects", async () => {
@@ -314,35 +371,6 @@ describe("pisync command routing", () => {
 
 		expect(notificationTextOf(ctx)).toContain("No config repo");
 		expect(showOutputOf(ctx)).toBe("");
-	});
-});
-
-describe("debug:clear-repo command", () => {
-	it("cancels when confirm is rejected", async () => {
-		const api = new FakeExtensionApi();
-		register(api);
-		const ctx = new FakeCommandContext();
-		ctx.ui.confirmResponses = [false];
-
-		const cmd = api.commands.get("debug:clear-repo")!;
-		await cmd.handler(undefined, ctx);
-
-		expect(ctx.ui.confirmCalls.length).toBe(1);
-		expect(
-			ctx.ui.notifications.some((n) => n.message.includes("Cancelled")),
-		).toBe(true);
-	});
-
-	it("handles missing repo gracefully (no state)", async () => {
-		const api = new FakeExtensionApi();
-		register(api);
-		const ctx = new FakeCommandContext();
-		ctx.ui.confirmResponses = [true];
-
-		const cmd = api.commands.get("debug:clear-repo")!;
-		await cmd.handler(undefined, ctx);
-
-		expect(ctx.ui.notifications.length).toBeGreaterThan(0);
 	});
 });
 
@@ -532,7 +560,9 @@ describe.sequential("pisync running UI", () => {
 			expect(notificationTextOf(ctx)).toContain(
 				"pi-sync [00:02] Waiting for Git...",
 			);
-			expect(ctx.ui.statusUpdates).toEqual([]);
+			expect(ctx.ui.statusUpdates).toEqual([
+				{ key: "pi-sync", value: undefined },
+			]);
 		} finally {
 			runSpy.mockRestore();
 			vi.useRealTimers();
@@ -570,7 +600,9 @@ describe.sequential("pisync running UI", () => {
 			).toHaveLength(1);
 			expect(messages).toContain("Pulling remote changes...");
 			expect(messages).toContain("Running: git fetch origin (timeout: 10s)...");
-			expect(ctx.ui.statusUpdates).toEqual([]);
+			expect(ctx.ui.statusUpdates).toEqual([
+				{ key: "pi-sync", value: undefined },
+			]);
 		} finally {
 			runSpy.mockRestore();
 		}
@@ -671,7 +703,7 @@ describe.sequential("pisync running UI", () => {
 			expect(notificationTextOf(ctx)).toContain(
 				"pi-sync exceeded 60 seconds and was stopped during preflight.",
 			);
-			expect(ctx.ui.statusUpdates).toEqual([]);
+			expect(ctx.ui.statusUpdates).toEqual(noStatusUpdates);
 		} finally {
 			runSpy.mockRestore();
 			vi.useRealTimers();
@@ -726,7 +758,7 @@ describe.sequential("pisync running UI", () => {
 			await pending;
 
 			expect(notificationTextOf(ctx)).toContain("pi-sync: Cancelled by user.");
-			expect(ctx.ui.statusUpdates).toEqual([]);
+			expect(ctx.ui.statusUpdates).toEqual(noStatusUpdates);
 		} finally {
 			runSpy.mockRestore();
 			vi.useRealTimers();
@@ -790,7 +822,7 @@ describe.sequential("pisync running UI", () => {
 			await pending;
 
 			expect(notificationTextOf(ctx)).toContain("pi-sync: Cancelled by user.");
-			expect(ctx.ui.statusUpdates).toEqual([]);
+			expect(ctx.ui.statusUpdates).toEqual(noStatusUpdates);
 		} finally {
 			runSpy.mockRestore();
 			vi.useRealTimers();
@@ -874,7 +906,7 @@ describe.sequential("Extension pull command interaction flow", () => {
 				expect(notificationTextOf(ctx)).toContain(
 					"timed out after 75 ms. Sync stopped.",
 				);
-				expect(ctx.ui.statusUpdates).toEqual([]);
+				expect(ctx.ui.statusUpdates).toEqual(noStatusUpdates);
 
 				// This second command represents the next message submitted in Pi.
 				await expect(command.handler("status", ctx)).resolves.toBeUndefined();

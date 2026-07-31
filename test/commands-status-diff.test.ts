@@ -10,7 +10,10 @@ import {
 	createGitFixture,
 	runGit,
 } from "./helpers/git-fixture.ts";
-import { withTestEnvironment } from "./helpers/temp-env.ts";
+import {
+	type TestEnvironment,
+	withTestEnvironment,
+} from "./helpers/temp-env.ts";
 
 const config = {
 	schemaVersion: 2,
@@ -45,6 +48,88 @@ async function seedConfigRepo(repoPath: string): Promise<void> {
 		"Initialize sync config",
 	]);
 }
+
+async function saveSyncedState(
+	environment: TestEnvironment,
+	repoPath: string,
+): Promise<void> {
+	const settings = JSON.stringify({ packages: ["npm:@jachy/pi-git-sync"] });
+	await environment.writeAgentFile("prompts/welcome.md", "base\n");
+	await environment.writeAgentFile("settings.json", settings);
+	const commit = (await runGit(repoPath, ["rev-parse", "HEAD"])).stdout;
+	await saveState(
+		environment.agentDir,
+		createSyncState({
+			repoPath,
+			branch: "main",
+			lastSyncedCommit: commit,
+			files: {
+				"prompts/welcome.md": { sha256: sha256("base\n"), mode: 0o644 },
+				"settings.json": { sha256: sha256(settings), mode: 0o644 },
+			},
+		}),
+	);
+}
+
+describe.sequential("PiSyncCommands.needsSync", () => {
+	it("returns false when no repository is configured", async () => {
+		await withTestEnvironment(async (environment) => {
+			const result = await new PiSyncCommands(environment.agentDir).needsSync();
+
+			expect(result).toBe(false);
+		});
+	});
+
+	it("detects local configuration changes without modifying them", async () => {
+		await withTestEnvironment(async (environment) => {
+			const fixture = await createGitFixture(environment.rootDir);
+			await seedConfigRepo(fixture.deviceBPath);
+			await runGit(fixture.deviceBPath, ["push", "origin", "main"]);
+			await saveSyncedState(environment, fixture.deviceBPath);
+			const commands = new PiSyncCommands(environment.agentDir);
+
+			expect(await commands.needsSync()).toBe(false);
+
+			await environment.writeAgentFile("prompts/welcome.md", "changed\n");
+			expect(await commands.needsSync()).toBe(true);
+		});
+	});
+
+	it("detects remote commits without fetching them", async () => {
+		await withTestEnvironment(async (environment) => {
+			const fixture = await createGitFixture(environment.rootDir);
+			await seedConfigRepo(fixture.deviceAPath);
+			await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
+			await runGit(fixture.deviceBPath, ["pull", "--ff-only"]);
+			await saveSyncedState(environment, fixture.deviceBPath);
+			const trackingCommitBefore = (
+				await runGit(fixture.deviceBPath, ["rev-parse", "origin/main"])
+			).stdout;
+
+			await writeFile(
+				join(fixture.deviceAPath, "sync/prompts/welcome.md"),
+				"remote change\n",
+				"utf-8",
+			);
+			await runGit(fixture.deviceAPath, ["add", "--all"]);
+			await runGit(fixture.deviceAPath, [
+				"commit",
+				"--no-gpg-sign",
+				"-m",
+				"Remote update",
+			]);
+			await runGit(fixture.deviceAPath, ["push", "origin", "main"]);
+
+			expect(await new PiSyncCommands(environment.agentDir).needsSync()).toBe(
+				true,
+			);
+			const trackingCommitAfter = (
+				await runGit(fixture.deviceBPath, ["rev-parse", "origin/main"])
+			).stdout;
+			expect(trackingCommitAfter).toBe(trackingCommitBefore);
+		});
+	});
+});
 
 describe.sequential("PiSyncCommands.status", () => {
 	it("returns a message when no config repo is configured", async () => {

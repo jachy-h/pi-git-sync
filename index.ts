@@ -23,6 +23,7 @@ import type {
 import { matchesKey, type SelectItem } from "@earendil-works/pi-tui";
 import { PiSyncCommands } from "./src/orchestration/commands.ts";
 import { runOperation } from "./src/extension/operation-runner.ts";
+import { setStatus, SyncStatus } from "./src/extension/status-manager.ts";
 import {
 	isSyncConflictRequest,
 	notificationLevelForResult,
@@ -30,7 +31,7 @@ import {
 	type ConflictChoice,
 	type NotificationLevel,
 	type RunOptions,
-	type SyncConflictRequest
+	type SyncConflictRequest,
 } from "./src/orchestration/operation-result.ts";
 
 const COMMAND_SETTLE_GRACE_MS = 100;
@@ -73,36 +74,45 @@ function getPiSyncArgumentCompletions(prefix: string): SelectItem[] | null {
 
 export default function (pi: ExtensionAPI) {
 	const cmds = new PiSyncCommands();
+	let sessionGeneration = 0;
+	let statusGeneration = 0;
+	const updateStatus = (
+		ui: Parameters<typeof setStatus>[0],
+		status: SyncStatus,
+	) => {
+		statusGeneration++;
+		setStatus(ui, status);
+	};
 
 	pi.on("session_start", (_event, ctx) => {
-		ctx.ui.setStatus("pi-sync", undefined);
+		const generation = ++sessionGeneration;
+		const currentStatusGeneration = statusGeneration;
+		void cmds
+			.needsSync()
+			.then((needsSync) => {
+				if (
+					generation !== sessionGeneration ||
+					currentStatusGeneration !== statusGeneration
+				)
+					return;
+				updateStatus(
+					ctx.ui,
+					needsSync ? SyncStatus.SyncNeeded : SyncStatus.None,
+				);
+			})
+			.catch(() => {
+				if (
+					generation === sessionGeneration &&
+					currentStatusGeneration === statusGeneration
+				) {
+					updateStatus(ctx.ui, SyncStatus.None);
+				}
+			});
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
-		ctx.ui.setStatus("pi-sync", undefined);
-	});
-
-	pi.registerCommand("debug:clear-repo", {
-		description:
-			"[DEBUG] Clear local and remote sync repo contents — for testing only",
-		async handler(_args, ctx) {
-			const confirmed = await ctx.ui.confirm(
-				"⚠ DEBUG: Clear Sync Repo",
-				"This will DELETE ALL contents from both local and remote sync repos.\nThis action cannot be undone. Continue?",
-			);
-			if (!confirmed) {
-				ctx.ui.notify("Cancelled.", "warning");
-				return;
-			}
-
-			ctx.ui.setStatus("pi-sync", ctx.ui.theme.fg("text", "Clearing repo..."));
-			const result = await cmds.clearRepo();
-			ctx.ui.setStatus("pi-sync", undefined);
-
-			notifyOperationResult(result, ctx);
-
-			if (result.reload) await ctx.reload();
-		},
+		sessionGeneration++;
+		updateStatus(ctx.ui, SyncStatus.None);
 	});
 
 	pi.registerCommand("pisync", {
@@ -112,7 +122,9 @@ export default function (pi: ExtensionAPI) {
 			switch (args?.trim()) {
 				case "":
 				case undefined:
-					await handlePiSync(cmds, pi, ctx);
+					await handlePiSync(cmds, pi, ctx, () =>
+						updateStatus(ctx.ui, SyncStatus.None),
+					);
 					break;
 				case "status":
 					await handleStatus(cmds, ctx);
@@ -165,6 +177,7 @@ async function handlePiSync(
 	cmds: PiSyncCommands,
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
+	onSyncComplete: () => void,
 ): Promise<void> {
 	let gitUrl: string | undefined;
 	let packageApproval: RunOptions["packageApproval"];
@@ -234,11 +247,19 @@ async function handlePiSync(
 			? (result.details as { conflict?: unknown }).conflict
 			: undefined;
 	if (isSyncConflictRequest(conflict)) {
-		await handleSyncConflict(conflict, result.message, cmds, pi, ctx);
+		await handleSyncConflict(
+			conflict,
+			result.message,
+			cmds,
+			pi,
+			ctx,
+			onSyncComplete,
+		);
 		return;
 	}
 
 	notifyOperationResult(result, ctx);
+	if (result.ok) onSyncComplete();
 	if (result.reload) {
 		const shouldReload = await ctx.ui.confirm(
 			"Reload Pi?",
@@ -316,6 +337,7 @@ async function handleSyncConflict(
 	cmds: PiSyncCommands,
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
+	onSyncComplete: () => void,
 ): Promise<void> {
 	if (!ctx.hasUI) {
 		notifyManualMergeMessage(message, ctx);
@@ -370,6 +392,7 @@ async function handleSyncConflict(
 	}
 
 	notifyOperationResult(result, ctx);
+	if (result.ok) onSyncComplete();
 	if (result.reload) {
 		const shouldReload = await ctx.ui.confirm(
 			"Reload Pi?",

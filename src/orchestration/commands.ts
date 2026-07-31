@@ -960,6 +960,46 @@ export class PiSyncCommands {
 
 	// ========== status ==========
 
+	/** Check local and remote state without changing the repository or agent files. */
+	async needsSync(): Promise<boolean> {
+		const lifecycle = await this.inspectLifecycleState();
+		if (lifecycle.kind !== "initialized") return false;
+
+		const { repoPath, state } = lifecycle;
+		const config = await loadPiSyncConfig(repoPath);
+		const [status, inventory, remote] = await Promise.all([
+			gitStatus(repoPath, config.branch),
+			compareFiles(this.agentDir, repoPath, config, state),
+			gitProbe(
+				repoPath,
+				["ls-remote", "--heads", "origin", `refs/heads/${config.branch}`],
+				{ timeout: config.pullTimeoutMs },
+			),
+		]);
+		const remoteCommit = remote.ok
+			? remote.stdout.trim().split(/\s+/, 1)[0]
+			: undefined;
+		const hasConfigurationChanges = inventory.comparisons.some(
+			(comparison) =>
+				comparison.changeType !== "no_change" &&
+				comparison.changeType !== "untracked_local",
+		);
+
+		return Boolean(
+			state.pendingOperation ||
+				status.branch !== config.branch ||
+				status.isRebasing ||
+				status.isMerging ||
+				status.hasConflicts ||
+				status.hasUncommittedChanges ||
+				status.ahead > 0 ||
+				status.behind > 0 ||
+				state.lastSyncedCommit !== status.commit ||
+				hasConfigurationChanges ||
+				(remoteCommit && remoteCommit !== status.commit),
+		);
+	}
+
 	async status(repoPath?: string): Promise<string> {
 		const rp = repoPath ?? (await getRepoPathSafe(this.agentDir));
 		if (!rp) return "No config repo configured. Run /pisync to set up first.";
