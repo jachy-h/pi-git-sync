@@ -1,4 +1,8 @@
-import type { RunOptions, RunResult, SyncPhase } from "../orchestration/operation-result.ts";
+import type {
+	RunOptions,
+	RunResult,
+	SyncPhase,
+} from "../orchestration/operation-result.ts";
 
 export interface OperationRunnerHost {
 	formatProgress: (elapsedMs: number, message: string) => string;
@@ -150,10 +154,15 @@ export async function runOperation(
 		]);
 	};
 
-	publishProgress();
-	elapsedTimer = setInterval(publishProgress, elapsedRefreshMs);
-	removeCancelListener = host.onCancel?.(cancel);
 	try {
+		publishProgress();
+		elapsedTimer = setInterval(publishProgress, elapsedRefreshMs);
+		removeCancelListener = host.onCancel?.(cancel);
+		if (controller.signal.aborted) {
+			await cancellationNotification;
+			return null;
+		}
+
 		const result = await startExecution();
 		if ((watchdogFired || cancelled) && commandExecution) {
 			await settleAbortedCommand();
