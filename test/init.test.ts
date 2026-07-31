@@ -226,6 +226,9 @@ describe("PiSyncCommands.run setup flow (end-to-end with a real git remote)", ()
 		// The local clone must actually contain the committed scaffold.
 		expect(existsSync(join(localRepoDir, ".git"))).toBe(true);
 		expect(existsSync(join(localRepoDir, "pi-sync.json"))).toBe(true);
+		expect(await readFile(join(localRepoDir, "README.md"), "utf-8")).toBe(
+			"# Pi 配置仓库 / Pi Configuration Repository\n\n此仓库用于在多台设备之间同步 Pi 配置。\nThis repository stores Pi configuration synchronized across your machines.\n\n由 [pi-git-sync](https://github.com/jachy-h/pi-git-sync) 创建和维护。\nCreated and maintained by [pi-git-sync](https://github.com/jachy-h/pi-git-sync).\n",
+		);
 		const scaffoldConfig = JSON.parse(
 			await readFile(join(localRepoDir, "pi-sync.json"), "utf-8"),
 		) as { exclude: string[] };

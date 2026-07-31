@@ -486,6 +486,14 @@ async function scaffoldConfigRepoV2(repoPath: string): Promise<void> {
 		JSON.stringify({ packages: ["npm:@jachy/pi-git-sync"] }, null, 2),
 		"utf-8",
 	);
+	const readmePath = join(repoPath, "README.md");
+	if (!existsSync(readmePath)) {
+		await writeFile(
+			readmePath,
+			"# Pi 配置仓库 / Pi Configuration Repository\n\n此仓库用于在多台设备之间同步 Pi 配置。\nThis repository stores Pi configuration synchronized across your machines.\n\n由 [pi-git-sync](https://github.com/jachy-h/pi-git-sync) 创建和维护。\nCreated and maintained by [pi-git-sync](https://github.com/jachy-h/pi-git-sync).\n",
+			"utf-8",
+		);
+	}
 	await writeFile(
 		join(repoPath, ".gitignore"),
 		"# Local state\n.pi-sync/\n",
