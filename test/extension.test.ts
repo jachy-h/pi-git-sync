@@ -270,7 +270,7 @@ describe("pisync command routing", () => {
 		expect(ctx.ui.statusUpdates).toEqual(noStatusUpdates);
 	});
 
-	it("rejects unknown arguments without side effects", async () => {
+	it("rejects unknown arguments and lists supported commands", async () => {
 		const api = new FakeExtensionApi();
 		register(api);
 		const ctx = createRpcContext();
@@ -280,7 +280,7 @@ describe("pisync command routing", () => {
 		expect(ctx.ui.selectCalls).toHaveLength(0);
 		expect(ctx.ui.inputCalls).toHaveLength(0);
 		expect(notificationTextOf(ctx)).toContain(
-			"This command was removed in v0.3.",
+			"Supported commands: /pisync, /pisync status, and /pisync diff.",
 		);
 	});
 
@@ -296,7 +296,7 @@ describe("pisync command routing", () => {
 			expect(ctx.ui.selectCalls).toHaveLength(0);
 			expect(ctx.ui.inputCalls).toHaveLength(0);
 			expect(notificationTextOf(ctx)).toContain(
-				"This command was removed in v0.3.",
+				"Supported commands: /pisync, /pisync status, and /pisync diff.",
 			);
 		},
 	);
@@ -335,7 +335,7 @@ describe("pisync command routing", () => {
 		expect(ctx.ui.selectCalls).toHaveLength(0);
 		expect(ctx.ui.inputCalls).toHaveLength(0);
 		expect(notificationTextOf(ctx)).toContain(
-			"This command was removed in v0.3.",
+			"Supported commands: /pisync, /pisync status, and /pisync diff.",
 		);
 	});
 

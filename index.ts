@@ -134,7 +134,7 @@ export default function (pi: ExtensionAPI) {
 					break;
 				default:
 					ctx.ui.notify(
-						"This command was removed in v0.3. Run /pisync to set up or sync.",
+						"Unsupported argument. Supported commands: /pisync, /pisync status, and /pisync diff.",
 						"warning",
 					);
 			}
