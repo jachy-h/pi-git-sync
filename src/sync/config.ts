@@ -33,31 +33,6 @@ export interface PiSyncSecurity {
 	scanSecretsBeforePush: boolean;
 }
 
-// ========== 默认配置 ==========
-
-export const DEFAULT_CONFIG: PiSyncConfig = {
-	schemaVersion: 2,
-	branch: "main",
-	root: "sync",
-	include: [
-		"settings.json",
-		"AGENTS.md",
-		"SYSTEM.md",
-		"APPEND_SYSTEM.md",
-		"keybindings.json",
-		"extensions/**",
-		"skills/**",
-		"prompts/**",
-		"themes/**",
-	],
-	exclude: ["**/.DS_Store", "**/*.tmp", "**/*.log"],
-	delete: "tracked",
-	pullTimeoutMs: 10000,
-	security: {
-		scanSecretsBeforePush: true,
-	},
-};
-
 // ========== 加载与校验 ==========
 
 /**

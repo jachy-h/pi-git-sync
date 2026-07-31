@@ -333,34 +333,6 @@ function changeTypeLabel(type: string): string {
 	}
 }
 
-// ========== Settings 变更 ==========
-
-export function formatSettingsChanges(
-	changes: Record<string, { before: unknown; after: unknown }>,
-): string {
-	if (Object.keys(changes).length === 0) return "No settings changes.";
-
-	const lines: string[] = ["Settings changes:"];
-	for (const [key, change] of Object.entries(changes)) {
-		const beforeStr =
-			change.before === undefined ? "(not set)" : JSON.stringify(change.before);
-		const afterStr = JSON.stringify(change.after);
-		const truncateLen = 80;
-		const b =
-			beforeStr.length > truncateLen
-				? beforeStr.slice(0, truncateLen) + "..."
-				: beforeStr;
-		const a =
-			afterStr.length > truncateLen
-				? afterStr.slice(0, truncateLen) + "..."
-				: afterStr;
-		lines.push(`  ${key}:`);
-		lines.push(`    - ${b}`);
-		lines.push(`    + ${a}`);
-	}
-	return lines.join("\n");
-}
-
 // ========== 秘密扫描 ==========
 
 export function formatSecretsFindings(
@@ -375,38 +347,6 @@ export function formatSecretsFindings(
 	for (const finding of findings) {
 		const lineInfo = finding.line ? `:${finding.line}` : "";
 		lines.push(`  [${finding.type}] ${finding.file}${lineInfo}`);
-	}
-	return lines.join("\n");
-}
-
-// ========== Package diff ==========
-
-export function formatPackageDiff(diff: PackageDiff): string {
-	if (
-		diff.added.length === 0 &&
-		diff.removed.length === 0 &&
-		diff.changed.length === 0
-	) {
-		return "No package changes.";
-	}
-
-	const lines: string[] = [];
-	if (diff.added.length > 0) {
-		lines.push(`  Packages to install (${diff.added.length}):`);
-		for (const pkg of diff.added) lines.push(`    + ${pkg}`);
-	}
-	if (diff.removed.length > 0) {
-		lines.push(
-			`  Local-only packages (not auto-removed) (${diff.removed.length}):`,
-		);
-		for (const pkg of diff.removed) lines.push(`    - ${pkg}`);
-	}
-	if (diff.changed.length > 0) {
-		lines.push(`  Packages to update (${diff.changed.length}):`);
-		for (const pkg of diff.changed) lines.push(`    ~ ${pkg}`);
-	}
-	if (diff.unchanged.length > 0) {
-		lines.push(`  Packages unchanged: ${diff.unchanged.length}`);
 	}
 	return lines.join("\n");
 }

@@ -129,13 +129,6 @@ export function buildGitEnv(): Record<string, string | undefined> {
 	};
 }
 
-/** @deprecated 保留用于兼容；v0.2 中 gitExec 改为 throw，不再需要此 helper */
-export function isGitFailure(stdout: string, stderr: string): boolean {
-	const FAIL_PATTERN =
-		/fatal:|error:|Permission denied|Could not read from remote|timed out|exceeded timeout|ETIMEDOUT|Connection (?:timed out|refused|reset)/i;
-	return FAIL_PATTERN.test(`${stderr}\n${stdout}`);
-}
-
 // ========== gitExec（严格：非零退出时 throw） ==========
 
 export interface GitCommandOptions {
@@ -519,15 +512,6 @@ export async function gitDiffRange(
 	return result.stdout;
 }
 
-export async function gitDiffNameOnly(
-	repoPath: string,
-	from: string,
-	to: string,
-): Promise<string[]> {
-	const result = await gitExec(repoPath, ["diff", "--name-only", from, to]);
-	return result.stdout.split("\n").filter(Boolean);
-}
-
 export async function gitDiffStaged(repoPath: string): Promise<string> {
 	const result = await gitExec(repoPath, ["diff", "--cached"]);
 	return result.stdout;
@@ -670,13 +654,6 @@ export async function gitRebase(
 		}
 		throw err;
 	}
-}
-
-/**
- * 继续 rebase（用户解决冲突后）
- */
-export async function gitRebaseContinue(repoPath: string): Promise<void> {
-	await gitExec(repoPath, ["rebase", "--continue"]);
 }
 
 /**
