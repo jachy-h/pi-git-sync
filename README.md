@@ -30,7 +30,13 @@ On the first machine:
 
 3. Run `/pisync` and enter the repository URL.
 
-On another machine, install the extension and run `/pisync` with the same URL. The repository is user data, not a Pi package—do not run `pi install` inside it.
+On another machine, install the extension and run `/pisync` with the same URL.
+
+---
+
+😄 **The steps above complete multi-device sync. What follows is only a more detailed explanation and can be skipped.**
+
+---
 
 ### Daily use
 

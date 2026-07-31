@@ -53,6 +53,9 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run typecheck && npm test",
+    "prepub": "node scripts/check-main-branch.mjs",
+    "prepub:minor": "node scripts/check-main-branch.mjs",
+    "prepub:major": "node scripts/check-main-branch.mjs",
     "pub": "npm version patch && npm publish --access public",
     "pub:minor": "npm version minor && npm publish --access public",
     "pub:major": "npm version major && npm publish --access public"

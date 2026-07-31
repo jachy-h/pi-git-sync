@@ -30,8 +30,7 @@ import {
 	type ConflictChoice,
 	type NotificationLevel,
 	type RunOptions,
-	type SyncConflictRequest,
-	type RunResult,
+	type SyncConflictRequest
 } from "./src/orchestration/operation-result.ts";
 
 const COMMAND_SETTLE_GRACE_MS = 100;
