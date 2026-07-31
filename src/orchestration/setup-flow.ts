@@ -286,14 +286,19 @@ export async function executeSetupFlow(
 			}
 			lines.push("");
 		} else if (repoState === "invalid") {
+			onProgress?.("Checking repository write access...");
+			const writeAccess = await probeRepoWriteAccess(repoPath);
+			const accessHint = getRepoWriteAccessHint(writeAccess);
 			return {
 				message:
 					`The repository at ${gitUrl} has commits but is not a valid pi-sync config repo.\n` +
 					"A pi-sync config repo must have a pi-sync.json at its root.\n" +
-					"Either use an empty repository for auto-scaffolding, or ensure the repo contains a valid pi-sync.json file.\n\n" +
+					accessHint +
+					"Use an empty repository that you can write to for auto-scaffolding, or ensure the repository contains a valid pi-sync.json file.\n\n" +
 					"Repair or replace the repository, then run /pisync again.",
 				needsReload: false,
 				ok: false,
+				details: { reason: "invalid_config_repo", writeAccess },
 				level: "error",
 			};
 		} else {
@@ -382,6 +387,52 @@ async function detectRepoState(
 	const probe = await gitProbe(repoPath, ["rev-list", "--count", "HEAD"]);
 	if (!probe.ok || parseInt(probe.stdout.trim(), 10) === 0) return "empty";
 	return existsSync(join(repoPath, "pi-sync.json")) ? "valid" : "invalid";
+}
+
+type RepoWriteAccess = "writable" | "denied" | "unknown";
+
+function getRepoWriteAccessHint(writeAccess: RepoWriteAccess): string {
+	switch (writeAccess) {
+		case "denied":
+			return (
+				"The repository is readable, but the remote rejected a safe write-access check.\n" +
+				"You may have selected someone else's repository or an account without push permission.\n"
+			);
+		case "writable":
+			return "Write access is available, so this is most likely the wrong repository or an uninitialized non-empty repository.\n";
+		default:
+			return "Write access could not be verified. Check that the repository URL is correct and that your account can push to it.\n";
+	}
+}
+
+/**
+ * Ask the remote to validate a push without updating any refs. This separates a
+ * readable public repository from one the current account can actually use for
+ * pi-sync. Policy failures remain "unknown" to avoid misreporting them as an
+ * authentication problem.
+ */
+async function probeRepoWriteAccess(
+	repoPath: string,
+): Promise<RepoWriteAccess> {
+	const probe = await gitProbe(
+		repoPath,
+		[
+			"push",
+			"--dry-run",
+			"--porcelain",
+			"origin",
+			"HEAD:refs/heads/pi-sync-write-access-check",
+		],
+		{ timeout: 30000 },
+	);
+	if (probe.ok) return "writable";
+
+	const output = `${probe.stderr}\n${probe.stdout}`;
+	return /access denied|permission denied|permission to .* denied|authentication failed|write access (?:to repository )?not granted|could not read from remote repository|repository not found|not authorized|not permitted|http[^\n]*403/i.test(
+		output,
+	)
+		? "denied"
+		: "unknown";
 }
 
 async function scaffoldConfigRepoV2(repoPath: string): Promise<void> {

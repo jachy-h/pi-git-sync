@@ -48,6 +48,29 @@ async function git(args: string[], opts: { cwd: string }): Promise<void> {
 	await execFile("git", args, opts);
 }
 
+async function createInvalidRemote(
+	workDir: string,
+	name: string,
+	allowPush: boolean,
+): Promise<string> {
+	const remote = join(workDir, `${name}.git`);
+	const seed = join(workDir, `${name}-seed`);
+	await mkdir(remote, { recursive: true });
+	await mkdir(seed, { recursive: true });
+	await git(["init", "--bare", "--initial-branch=main", remote], {
+		cwd: workDir,
+	});
+	await git(["init", "--initial-branch=main"], { cwd: seed });
+	await writeFile(join(seed, "README.md"), "# Existing repository\n");
+	await git(["add", "README.md"], { cwd: seed });
+	await git(["commit", "-m", "initial commit"], { cwd: seed });
+	await git(["push", remote, "HEAD:main"], { cwd: seed });
+	await git(["config", "daemon.receivepack", String(allowPush)], {
+		cwd: remote,
+	});
+	return remote;
+}
+
 describe("PiSyncCommands.run setup flow (end-to-end with a real git remote)", () => {
 	let workDir: string;
 	let agentDir: string;
@@ -263,6 +286,55 @@ describe("PiSyncCommands.run setup flow (end-to-end with a real git remote)", ()
 		});
 		expect(result.message).toContain("Invalid Git URL: not a git URL");
 		expect(existsSync(join(isolatedAgentDir, "..", "config-repo"))).toBe(false);
+	}, 30000);
+
+	it("explains when a non-config repository is readable but not writable", async () => {
+		await createInvalidRemote(workDir, "read-only-invalid", false);
+		const isolatedAgentDir = join(workDir, "read-only-client", "agent");
+		await mkdir(isolatedAgentDir, { recursive: true });
+
+		const result = await new PiSyncCommands(isolatedAgentDir).run({
+			gitUrl: `git://127.0.0.1:${port}/read-only-invalid.git`,
+		});
+
+		expect(result).toMatchObject({
+			ok: false,
+			mode: "setup",
+			phase: "preflight",
+			details: {
+				reason: "invalid_config_repo",
+				writeAccess: "denied",
+			},
+		});
+		expect(result.message).toContain(
+			"The repository is readable, but the remote rejected a safe write-access check.",
+		);
+		expect(result.message).toContain(
+			"You may have selected someone else's repository",
+		);
+	}, 30000);
+
+	it("identifies a writable non-config repository as the likely wrong repository", async () => {
+		await createInvalidRemote(workDir, "writable-invalid", true);
+		const isolatedAgentDir = join(workDir, "writable-client", "agent");
+		await mkdir(isolatedAgentDir, { recursive: true });
+
+		const result = await new PiSyncCommands(isolatedAgentDir).run({
+			gitUrl: `git://127.0.0.1:${port}/writable-invalid.git`,
+		});
+
+		expect(result).toMatchObject({
+			ok: false,
+			mode: "setup",
+			phase: "preflight",
+			details: {
+				reason: "invalid_config_repo",
+				writeAccess: "writable",
+			},
+		});
+		expect(result.message).toContain(
+			"this is most likely the wrong repository or an uninitialized non-empty repository",
+		);
 	}, 30000);
 
 	it("onboards a new device from an existing remote and then returns noop", async () => {
