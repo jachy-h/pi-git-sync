@@ -56,9 +56,9 @@
     "prepub": "node scripts/check-main-branch.mjs",
     "prepub:minor": "node scripts/check-main-branch.mjs",
     "prepub:major": "node scripts/check-main-branch.mjs",
-    "pub": "npm version patch && npm publish --access public",
-    "pub:minor": "npm version minor && npm publish --access public",
-    "pub:major": "npm version major && npm publish --access public"
+    "pub": "node scripts/publish.mjs patch",
+    "pub:minor": "node scripts/publish.mjs minor",
+    "pub:major": "node scripts/publish.mjs major"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "^0.82.1",
