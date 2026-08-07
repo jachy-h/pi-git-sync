@@ -29,6 +29,21 @@ vi.mock("../src/orchestration/commands.ts", () => ({
 			return "/tmp/config-repo";
 		}
 
+		async plan() {
+			return { kind: "setup", message: "Mocked setup plan" };
+		}
+
+		async resolveConflict() {
+			return {
+				code: "ok",
+				message: "Mocked conflict resolution",
+				mode: "sync" as const,
+				phase: "complete" as const,
+				ok: true,
+				reload: false,
+			};
+		}
+
 		async run() {
 			return {
 				code: "blocked_conflict",
@@ -99,7 +114,8 @@ describe("manual merge guidance", () => {
 			options: [
 				"Ask agent to merge",
 				"Abort — I'll merge manually",
-				"Use local for conflicts",
+				"Choose content for each file",
+				"Use local for all conflicts",
 				"Use remote for conflicts",
 			],
 		});
@@ -117,6 +133,31 @@ describe("manual merge guidance", () => {
 		expect(prompt).toContain("without force push");
 		expect(prompt).not.toContain("change from");
 		expect(ctx.reloadCalls).toBe(0);
+	});
+
+	it("collects and confirms a file-level conflict choice", async () => {
+		const api = new FakeExtensionApi();
+		extension(api as unknown as ExtensionAPI);
+		const ctx = new FakeCommandContext("rpc");
+		ctx.ui.selectResponses.push(
+			"Choose content for each file",
+			"Use shared remote content",
+		);
+		ctx.ui.confirmResponses.push(true);
+
+		await api.commands.get("pisync")!.handler(undefined, ctx);
+
+		expect(ctx.ui.selectCalls).toEqual([
+			expect.objectContaining({ title: "Sync conflict detected" }),
+			expect.objectContaining({ title: "Resolve prompts/welcome.md" }),
+		]);
+		expect(ctx.ui.confirmCalls.at(-1)).toMatchObject({
+			title: "Apply selected conflict resolutions?",
+			message: expect.stringContaining("shared remote: prompts/welcome.md"),
+		});
+		expect(ctx.ui.notifications.at(-1)?.message).toContain(
+			"Mocked conflict resolution",
+		);
 	});
 
 	it("queues the agent task as a follow-up when the agent is busy", async () => {

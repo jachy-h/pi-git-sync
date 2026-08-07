@@ -39,6 +39,7 @@ async function seedConfigRepo(repoPath: string): Promise<void> {
 
 type RunResultLike = {
 	ok: boolean;
+	code?: string;
 	message: string;
 	mode: "setup" | "sync" | "recovery";
 	phase: string;
@@ -85,6 +86,50 @@ describe("v0.3 unified command domain contract", () => {
 			expect(result.ok).toBe(false);
 			expect(result.mode).toBe("setup");
 			expect(result.details?.needsGitUrl).toBe(true);
+		});
+	});
+
+	it("builds a fingerprinted plan and rejects execution after the plan becomes stale", async () => {
+		await withTestEnvironment(async (environment) => {
+			const fixture = await createGitFixture(environment.rootDir);
+			await seedConfigRepo(fixture.deviceAPath);
+			await environment.writeAgentFile("prompts/welcome.md", "baseline\n");
+			await environment.writeAgentFile("settings.json", "{}\n");
+			await saveState(
+				environment.agentDir,
+				createSyncState({
+					repoPath: fixture.deviceAPath,
+					files: {
+						"prompts/welcome.md": {
+							sha256: sha256("baseline\n"),
+							mode: 0o644,
+						},
+						"settings.json": { sha256: sha256("{}\n"), mode: 0o644 },
+					},
+				}),
+			);
+			const commands = new PiSyncCommands(environment.agentDir);
+			const plan = await commands.plan();
+
+			expect(plan).toMatchObject({ kind: "ready", changes: [] });
+			if (plan.kind !== "ready") throw new Error("Expected ready plan");
+
+			await environment.writeAgentFile("prompts/welcome.md", "changed\n");
+			const result = await runOf(commands, {
+				expectedPlanFingerprint: plan.fingerprint,
+			});
+
+			expect(result).toMatchObject({
+				ok: false,
+				code: "blocked_validation",
+				phase: "preflight",
+			});
+			expect(
+				await readFile(
+					join(fixture.deviceAPath, "sync/prompts/welcome.md"),
+					"utf-8",
+				),
+			).toBe("baseline\n");
 		});
 	});
 

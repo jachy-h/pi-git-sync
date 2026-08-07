@@ -91,6 +91,20 @@ async function createConflict(
 	};
 }
 
+function chooseAllPaths(
+	request: SyncConflictRequest,
+	choice: "use_local" | "use_remote",
+): { byPath: Record<string, "use_local" | "use_remote"> } {
+	return {
+		byPath: Object.fromEntries(
+			request.paths.flatMap((path) => [
+				[path.relativePath, choice],
+				[`sync/${path.relativePath}`, choice],
+			]),
+		),
+	};
+}
+
 async function advanceDeviceSnapshot(
 	conflict: Awaited<ReturnType<typeof createConflict>>,
 	relativePath: string,
@@ -271,7 +285,7 @@ describe.sequential("PiSyncCommands.resolveConflict", () => {
 			const result = await resolveAutomaticConflict({
 				repoPath: conflict.repoPath,
 				request: conflict.request,
-				choice: "use_local",
+				choice: chooseAllPaths(conflict.request, "use_local"),
 				beforeCommit: async () => ({
 					code: "blocked_validation",
 					message: "Synthetic validation failure",
@@ -302,7 +316,7 @@ describe.sequential("PiSyncCommands.resolveConflict", () => {
 			const result = await resolveAutomaticConflict({
 				repoPath: conflict.repoPath,
 				request: conflict.request,
-				choice: "use_local",
+				choice: chooseAllPaths(conflict.request, "use_local"),
 				beforeCommit: async () => {
 					await writeFile(
 						join(conflict.publisherPath, "sync/prompts/race.md"),

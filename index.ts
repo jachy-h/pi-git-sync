@@ -29,8 +29,10 @@ import {
 	notificationLevelForResult,
 	type CommandResult,
 	type ConflictChoice,
+	type ConflictResolutionChoice,
 	type NotificationLevel,
 	type RunOptions,
+	type SyncPlan,
 	type SyncConflictRequest,
 } from "./src/orchestration/operation-result.ts";
 
@@ -173,6 +175,81 @@ function notifyOperationResult(
 
 // ========== 命令处理器 ==========
 
+function planNeedsConfirmation(
+	plan: Extract<SyncPlan, { kind: "ready" }>,
+): boolean {
+	return (
+		plan.changes.length > 0 ||
+		plan.remote.ahead > 0 ||
+		plan.remote.behind > 0 ||
+		plan.packages.added.length > 0 ||
+		plan.packages.removed.length > 0 ||
+		plan.packages.changed.length > 0 ||
+		plan.pendingRecovery
+	);
+}
+
+function formatSyncPlan(plan: Extract<SyncPlan, { kind: "ready" }>): string {
+	const lines = ["Review before synchronization:"];
+	if (plan.changes.length > 0) {
+		lines.push("", "File changes:");
+		for (const change of plan.changes) {
+			lines.push(`  ${change.changeType}: ${change.relativePath}`);
+		}
+	}
+	if (plan.remote.ahead > 0 || plan.remote.behind > 0) {
+		lines.push(
+			``,
+			`Remote commits: ${plan.remote.ahead} to push, ${plan.remote.behind} to pull.`,
+		);
+	}
+	const packageChanges = [
+		...plan.packages.added.map((source) => `install ${source}`),
+		...plan.packages.changed.map((source) => `change ${source}`),
+		...plan.packages.removed.map((source) => `remove ${source}`),
+	];
+	if (packageChanges.length > 0) {
+		lines.push(
+			"",
+			"Package changes:",
+			...packageChanges.map((item) => `  ${item}`),
+		);
+	}
+	if (plan.pendingRecovery) {
+		lines.push("", "A previous incomplete operation will be recovered.");
+	}
+	lines.push("", "Continue with this synchronization?");
+	return lines.join("\n");
+}
+
+async function requestSyncPlanConfirmation(
+	cmds: PiSyncCommands,
+	ctx: ExtensionCommandContext,
+): Promise<string | undefined | null> {
+	const plan = await cmds.plan();
+	if (plan.kind === "blocked") {
+		ctx.ui.notify(`pi-sync: ${plan.message}`, "warning");
+		return null;
+	}
+	if (plan.kind === "setup" || !planNeedsConfirmation(plan)) return undefined;
+	if (!ctx.hasUI) {
+		ctx.ui.notify(
+			"pi-sync: Synchronization requires an interactive confirmation. Run /pisync in a Pi session with a UI.",
+			"warning",
+		);
+		return null;
+	}
+	const confirmed = await ctx.ui.confirm("Sync plan", formatSyncPlan(plan));
+	if (!confirmed) {
+		ctx.ui.notify(
+			"pi-sync: Sync cancelled before changes were made.",
+			"warning",
+		);
+		return null;
+	}
+	return plan.fingerprint;
+}
+
 async function handlePiSync(
 	cmds: PiSyncCommands,
 	pi: ExtensionAPI,
@@ -212,7 +289,12 @@ async function handlePiSync(
 			},
 		});
 
-	let result = await run();
+	const expectedPlanFingerprint = await requestSyncPlanConfirmation(cmds, ctx);
+	if (expectedPlanFingerprint === null) return;
+
+	let result = await run(
+		expectedPlanFingerprint ? { expectedPlanFingerprint } : {},
+	);
 	if (result === null) return;
 	const details = result.details;
 	if (details?.needsGitUrl) {
@@ -300,7 +382,8 @@ const conflictChoices: ReadonlyArray<{
 }> = [
 	{ choice: "ask_agent", label: "Ask agent to merge" },
 	{ choice: "abort", label: "Abort — I'll merge manually" },
-	{ choice: "use_local", label: "Use local for conflicts" },
+	{ choice: "choose_by_file", label: "Choose content for each file" },
+	{ choice: "use_local", label: "Use local for all conflicts" },
 	{ choice: "use_remote", label: "Use remote for conflicts" },
 ];
 
@@ -366,24 +449,65 @@ async function handleSyncConflict(
 		return;
 	}
 
-	const source = choice === "use_local" ? "current-device" : "shared remote";
-	const confirmed = await ctx.ui.confirm(
-		`Use ${source} content for conflicts?`,
-		`${conflict.paths.length} conflicting path(s) will use ${source} content. The current-device branch origin/${conflict.deviceBranch} will remain available for recovery.`,
-	);
-	if (!confirmed) {
-		ctx.ui.notify("Conflict resolution cancelled.", "warning");
-		return;
+	let resolutionChoice: ConflictResolutionChoice;
+	if (choice === "choose_by_file") {
+		const byPath: Record<string, "use_local" | "use_remote"> = {};
+		for (const path of conflict.paths) {
+			const selected = await ctx.ui.select(`Resolve ${path.relativePath}`, [
+				"Use current-device content",
+				"Use shared remote content",
+				"Cancel",
+			]);
+			if (selected === "Use current-device content") {
+				byPath[path.relativePath] = "use_local";
+			} else if (selected === "Use shared remote content") {
+				byPath[path.relativePath] = "use_remote";
+			} else {
+				ctx.ui.notify("Conflict resolution cancelled.", "warning");
+				return;
+			}
+		}
+		const localPaths = Object.entries(byPath).flatMap(([path, selection]) =>
+			selection === "use_local" ? [`  current-device: ${path}`] : [],
+		);
+		const remotePaths = Object.entries(byPath).flatMap(([path, selection]) =>
+			selection === "use_remote" ? [`  shared remote: ${path}`] : [],
+		);
+		const confirmed = await ctx.ui.confirm(
+			"Apply selected conflict resolutions?",
+			[
+				...localPaths,
+				...remotePaths,
+				"",
+				`The current-device branch origin/${conflict.deviceBranch} remains available for recovery.`,
+			].join("\n"),
+		);
+		if (!confirmed) {
+			ctx.ui.notify("Conflict resolution cancelled.", "warning");
+			return;
+		}
+		resolutionChoice = { byPath };
+	} else {
+		const source = choice === "use_local" ? "current-device" : "shared remote";
+		const confirmed = await ctx.ui.confirm(
+			`Use ${source} content for conflicts?`,
+			`${conflict.paths.length} conflicting path(s) will use ${source} content. The current-device branch origin/${conflict.deviceBranch} will remain available for recovery.`,
+		);
+		if (!confirmed) {
+			ctx.ui.notify("Conflict resolution cancelled.", "warning");
+			return;
+		}
+		resolutionChoice = choice;
 	}
 
-	let result = await cmds.resolveConflict(conflict, choice);
+	let result = await cmds.resolveConflict(conflict, resolutionChoice);
 	if (result.code === "approval_required") {
 		const approval = await requestPackageApproval(result, ctx);
 		if (!approval.approved) {
 			ctx.ui.notify("Package installation cancelled.", "warning");
 			return;
 		}
-		result = await cmds.resolveConflict(conflict, choice, {
+		result = await cmds.resolveConflict(conflict, resolutionChoice, {
 			packageApproval: {
 				approvedSources: approval.approvedSources,
 				remember: approval.remember,

@@ -390,12 +390,14 @@ describe.sequential("Extension push command interaction flow", () => {
 			const api = new FakeExtensionApi();
 			register(api);
 			const ctx = createRpcContext();
+			ctx.ui.confirmResponses = [true];
 
 			const cmd = api.commands.get("pisync")!;
 			await cmd.handler(undefined, ctx);
 
-			expect(ctx.ui.confirmCalls).toHaveLength(1);
-			expect(ctx.ui.confirmCalls[0]?.title).toBe("Reload Pi?");
+			expect(ctx.ui.confirmCalls).toHaveLength(2);
+			expect(ctx.ui.confirmCalls[0]?.title).toBe("Sync plan");
+			expect(ctx.ui.confirmCalls[1]?.title).toBe("Reload Pi?");
 			expect(ctx.reloadCalls).toBe(0);
 			expect(ctx.ui.notifications.length).toBeGreaterThan(0);
 		});
@@ -428,11 +430,13 @@ describe.sequential("Extension push command interaction flow", () => {
 			const api = new FakeExtensionApi();
 			register(api);
 			const ctx = createRpcContext();
+			ctx.ui.confirmResponses = [true];
 
 			const cmd = api.commands.get("pisync")!;
 			await cmd.handler(undefined, ctx);
 
 			expect(ctx.ui.confirmCalls).toEqual([
+				expect.objectContaining({ title: "Sync plan" }),
 				{
 					title: "Reload Pi?",
 					message:
@@ -478,12 +482,13 @@ describe.sequential("Extension push command interaction flow", () => {
 			const api = new FakeExtensionApi();
 			register(api);
 			const ctx = createRpcContext();
-			ctx.ui.confirmResponses = [true];
+			ctx.ui.confirmResponses = [true, true];
 
 			const cmd = api.commands.get("pisync")!;
 			await cmd.handler(undefined, ctx);
 
 			expect(ctx.ui.confirmCalls).toEqual([
+				expect.objectContaining({ title: "Sync plan" }),
 				{
 					title: "Reload Pi?",
 					message:
@@ -492,6 +497,48 @@ describe.sequential("Extension push command interaction flow", () => {
 			]);
 			expect(ctx.reloadCalls).toBe(1);
 		});
+	});
+
+	it("cancels before running when the sync plan is rejected", async () => {
+		const planSpy = vi
+			.spyOn(PiSyncCommands.prototype, "plan")
+			.mockResolvedValue({
+				kind: "ready",
+				fingerprint: "planned-state",
+				changes: [
+					{ relativePath: "prompts/welcome.md", changeType: "local_only" },
+				],
+				packages: {
+					added: ["npm:example@1.0.0"],
+					removed: [],
+					changed: [],
+				},
+				remote: { ahead: 1, behind: 2 },
+				pendingRecovery: true,
+				message: "Review this plan",
+			});
+		const runSpy = vi.spyOn(PiSyncCommands.prototype, "run");
+		try {
+			const api = new FakeExtensionApi();
+			register(api);
+			const ctx = createRpcContext();
+
+			await api.commands.get("pisync")!.handler(undefined, ctx);
+
+			expect(runSpy).not.toHaveBeenCalled();
+			expect(ctx.ui.confirmCalls).toEqual([
+				expect.objectContaining({
+					title: "Sync plan",
+					message: expect.stringContaining("npm:example@1.0.0"),
+				}),
+			]);
+			expect(notificationTextOf(ctx)).toContain(
+				"Sync cancelled before changes were made.",
+			);
+		} finally {
+			planSpy.mockRestore();
+			runSpy.mockRestore();
+		}
 	});
 
 	it("does not request a reload when result.reload is false", async () => {
@@ -521,8 +568,10 @@ describe.sequential("Extension push command interaction flow", () => {
 			const cmd = api.commands.get("pisync")!;
 			await cmd.handler(undefined, ctx);
 
-			// No changes = reload false
-			expect(ctx.ui.confirmCalls).toHaveLength(0);
+			// The plan reports an unsynced repository setting, but the completed run does not reload.
+			expect(ctx.ui.confirmCalls).toEqual([
+				expect.objectContaining({ title: "Sync plan" }),
+			]);
 			expect(ctx.reloadCalls).toBe(0);
 		});
 	});
@@ -540,6 +589,9 @@ describe.sequential("pisync running UI", () => {
 					finishRun = resolve;
 				});
 			});
+		const planSpy = vi
+			.spyOn(PiSyncCommands.prototype, "plan")
+			.mockResolvedValue({ kind: "setup", message: "Mocked setup plan" });
 		try {
 			const api = new FakeExtensionApi();
 			register(api);
@@ -565,6 +617,7 @@ describe.sequential("pisync running UI", () => {
 			]);
 		} finally {
 			runSpy.mockRestore();
+			planSpy.mockRestore();
 			vi.useRealTimers();
 		}
 	});
@@ -682,6 +735,9 @@ describe.sequential("pisync running UI", () => {
 					);
 				});
 			});
+		const planSpy = vi
+			.spyOn(PiSyncCommands.prototype, "plan")
+			.mockResolvedValue({ kind: "setup", message: "Mocked setup plan" });
 		try {
 			const api = new FakeExtensionApi();
 			register(api);
@@ -706,6 +762,7 @@ describe.sequential("pisync running UI", () => {
 			expect(ctx.ui.statusUpdates).toEqual(noStatusUpdates);
 		} finally {
 			runSpy.mockRestore();
+			planSpy.mockRestore();
 			vi.useRealTimers();
 		}
 	});
@@ -739,6 +796,9 @@ describe.sequential("pisync running UI", () => {
 					);
 				});
 			});
+		const planSpy = vi
+			.spyOn(PiSyncCommands.prototype, "plan")
+			.mockResolvedValue({ kind: "setup", message: "Mocked setup plan" });
 		try {
 			const api = new FakeExtensionApi();
 			register(api);
@@ -761,6 +821,7 @@ describe.sequential("pisync running UI", () => {
 			expect(ctx.ui.statusUpdates).toEqual(noStatusUpdates);
 		} finally {
 			runSpy.mockRestore();
+			planSpy.mockRestore();
 			vi.useRealTimers();
 		}
 	});
@@ -791,6 +852,9 @@ describe.sequential("pisync running UI", () => {
 				started();
 				return await new Promise<RunResult>(() => {});
 			});
+		const planSpy = vi
+			.spyOn(PiSyncCommands.prototype, "plan")
+			.mockResolvedValue({ kind: "setup", message: "Mocked setup plan" });
 		try {
 			const api = new FakeExtensionApi();
 			register(api);
@@ -825,6 +889,7 @@ describe.sequential("pisync running UI", () => {
 			expect(ctx.ui.statusUpdates).toEqual(noStatusUpdates);
 		} finally {
 			runSpy.mockRestore();
+			planSpy.mockRestore();
 			vi.useRealTimers();
 		}
 	});
@@ -988,14 +1053,15 @@ describe.sequential("Extension pull command interaction flow", () => {
 			const api = new FakeExtensionApi();
 			register(api);
 			const ctx = createRpcContext();
-			ctx.ui.confirmResponses = [true, true];
+			ctx.ui.confirmResponses = [true, true, true];
 
 			await api.commands.get("pisync")!.handler(undefined, ctx);
 
-			expect(ctx.ui.confirmCalls[0]?.title).toContain(
+			expect(ctx.ui.confirmCalls[0]?.title).toBe("Sync plan");
+			expect(ctx.ui.confirmCalls[1]?.title).toContain(
 				"Approve package installation",
 			);
-			expect(ctx.ui.confirmCalls[1]?.title).toBe("Reload Pi?");
+			expect(ctx.ui.confirmCalls[2]?.title).toBe("Reload Pi?");
 			expect(ctx.ui.notifications.at(-1)?.message).toContain("Files written");
 			expect(ctx.reloadCalls).toBe(1);
 		});
@@ -1031,7 +1097,7 @@ describe.sequential("Extension pull command interaction flow", () => {
 			const api = new FakeExtensionApi();
 			register(api);
 			const ctx = createRpcContext();
-			ctx.ui.confirmResponses = [false];
+			ctx.ui.confirmResponses = [true, false];
 
 			await api.commands.get("pisync")!.handler(undefined, ctx);
 

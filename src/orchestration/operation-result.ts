@@ -20,9 +20,23 @@ function assertNever(value: never): never {
 export type RunMode = "setup" | "sync" | "recovery";
 export type SyncPhase = "preflight" | "pull" | "apply" | "push" | "complete";
 
-export type ConflictChoice = "ask_agent" | "abort" | "use_local" | "use_remote";
+export type ConflictChoice =
+	| "ask_agent"
+	| "abort"
+	| "use_local"
+	| "use_remote"
+	| "choose_by_file";
 
 export type AutomaticConflictChoice = "use_local" | "use_remote";
+
+/** A trusted, per-path selection collected from a SyncConflictRequest. */
+export interface ConflictPathChoices {
+	byPath: Record<string, AutomaticConflictChoice>;
+}
+
+export type ConflictResolutionChoice =
+	| AutomaticConflictChoice
+	| ConflictPathChoices;
 
 export interface SyncConflictPath {
 	relativePath: string;
@@ -42,6 +56,31 @@ export interface SyncConflictRequest {
 	paths: SyncConflictPath[];
 }
 
+export interface SyncPlanChange {
+	relativePath: string;
+	changeType: string;
+}
+
+/** Read-only snapshot shown before a regular synchronization can make changes. */
+export type SyncPlan =
+	| {
+			kind: "setup";
+			message: string;
+	  }
+	| {
+			kind: "blocked";
+			message: string;
+	  }
+	| {
+			kind: "ready";
+			fingerprint: string;
+			changes: SyncPlanChange[];
+			packages: { added: string[]; removed: string[]; changed: string[] };
+			remote: { ahead: number; behind: number };
+			pendingRecovery: boolean;
+			message: string;
+	  };
+
 export function isSyncConflictRequest(
 	value: unknown,
 ): value is SyncConflictRequest {
@@ -59,6 +98,8 @@ export function isSyncConflictRequest(
 export interface RunOptions {
 	gitUrl?: string;
 	packageApproval?: PackageApproval;
+	/** Reject execution if the read-only plan changed while the user was deciding. */
+	expectedPlanFingerprint?: string;
 	/** Cancels nested subprocesses when the user aborts or a deadline fires. */
 	signal?: AbortSignal;
 	onProgress?: (phase: SyncPhase, message: string) => void;

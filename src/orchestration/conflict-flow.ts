@@ -5,7 +5,7 @@ import { approvePackagePlan, preparePackagePlan } from "../system/packages.ts";
 import type { PackageApproval } from "../system/packages.ts";
 import type { SyncState } from "../system/state.ts";
 import type {
-	AutomaticConflictChoice,
+	ConflictPathChoices,
 	CommandResult,
 	SyncConflictRequest,
 } from "./operation-result.ts";
@@ -21,7 +21,7 @@ export interface ResolveConflictFlowOptions {
 	config: PiSyncConfig;
 	state: SyncState;
 	request: SyncConflictRequest;
-	choice: AutomaticConflictChoice;
+	choice: ConflictPathChoices;
 	packageApproval?: PackageApproval;
 	reportProgress: (phase: "pull" | "apply", message: string) => void;
 	getRepoSyncFiles: (
@@ -69,10 +69,18 @@ export async function resolveConflictFlow(
 	} = options;
 
 	reportProgress("pull", "Resolving selected conflict paths...");
+	const gitPathChoices = {
+		byPath: Object.fromEntries(
+			Object.entries(choice.byPath).flatMap(([path, selection]) => [
+				[path, selection],
+				[`${config.root}/${path}`, selection],
+			]),
+		),
+	};
 	const resolution = await resolveAutomaticConflict({
 		repoPath,
 		request,
-		choice,
+		choice: gitPathChoices,
 		beforeCommit: async () => {
 			const files = await getRepoSyncFiles(repoPath, config);
 			const validation = await validateFiles(repoPath, config, files);
@@ -145,10 +153,11 @@ export async function resolveConflictFlow(
 	}
 
 	reportProgress("apply", "Applying resolved configuration...");
-	const remoteConflictPaths =
-		choice === "use_remote"
-			? new Set(request.paths.map((path) => path.relativePath))
-			: undefined;
+	const remoteConflictPaths = new Set(
+		request.paths
+			.filter((path) => choice.byPath[path.relativePath] === "use_remote")
+			.map((path) => path.relativePath),
+	);
 	const apply = await applyCurrent(
 		repoPath,
 		config,
@@ -160,6 +169,6 @@ export async function resolveConflictFlow(
 	);
 	return {
 		...apply,
-		message: `Conflict resolved using ${choice === "use_local" ? "current-device" : "shared remote"} content.\n${apply.message}`,
+		message: `Conflict resolved using selected current-device and shared remote content.\n${apply.message}`,
 	};
 }

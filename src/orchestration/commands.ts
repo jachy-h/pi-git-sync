@@ -65,9 +65,12 @@ import {
 } from "./operation-result.ts";
 import type {
 	CommandResult,
+	ConflictPathChoices,
+	ConflictResolutionChoice,
 	ResultCode,
 	RunOptions,
 	RunResult,
+	SyncPlan,
 	SyncConflictPath,
 	SyncConflictRequest,
 	SyncPhase,
@@ -226,16 +229,136 @@ export class PiSyncCommands {
 		return state.repoPath && existsSync(state.repoPath) ? state.repoPath : null;
 	}
 
+	private normalizeConflictChoices(
+		request: SyncConflictRequest,
+		choice: ConflictResolutionChoice,
+	): ConflictPathChoices | undefined {
+		const byPath: Record<
+			string,
+			import("./operation-result.ts").AutomaticConflictChoice
+		> = {};
+		for (const path of request.paths) {
+			const selected =
+				typeof choice === "string" ? choice : choice.byPath[path.relativePath];
+			if (selected !== "use_local" && selected !== "use_remote")
+				return undefined;
+			byPath[path.relativePath] = selected;
+		}
+		if (
+			typeof choice !== "string" &&
+			Object.keys(choice.byPath).some((path) => !(path in byPath))
+		) {
+			return undefined;
+		}
+		return { byPath };
+	}
+
+	/** Build a read-only, fingerprinted summary for an interactive sync confirmation. */
+	async plan(): Promise<SyncPlan> {
+		const lifecycle = await this.inspectLifecycleState();
+		if (lifecycle.kind === "broken") {
+			return {
+				kind: "blocked",
+				message: `Sync state is damaged: ${lifecycle.reason}`,
+			};
+		}
+		if (lifecycle.kind === "uninitialized") {
+			return {
+				kind: "setup",
+				message:
+					"Enter a config repo Git URL to review and complete first-time setup.",
+			};
+		}
+		if (lifecycle.kind === "interrupted_setup") {
+			return {
+				kind: "setup",
+				message:
+					"An interrupted setup will be resumed after confirmation of its repository URL.",
+			};
+		}
+		return await this.planInitializedSync(lifecycle.repoPath, lifecycle.state);
+	}
+
+	private async planInitializedSync(
+		repoPath: string,
+		state: SyncState,
+	): Promise<Extract<SyncPlan, { kind: "ready" }>> {
+		const config = await loadPiSyncConfig(repoPath);
+		const [status, inventory, packageDiff] = await Promise.all([
+			gitStatus(repoPath, config.branch),
+			compareFiles(this.agentDir, repoPath, config, state),
+			getPackageDiff(repoPath, this.agentDir, config).catch(() => ({
+				added: [],
+				removed: [],
+				changed: [],
+				unchanged: [],
+			})),
+		]);
+		const changes = inventory.comparisons
+			.filter(
+				(comparison) =>
+					comparison.changeType !== "no_change" &&
+					comparison.changeType !== "converged",
+			)
+			.map(({ relativePath, changeType, local, remote }) => ({
+				relativePath,
+				changeType,
+				local: local?.sha256 ?? "absent",
+				remote: remote?.sha256 ?? "absent",
+			}));
+		const packages = {
+			added: packageDiff.added,
+			removed: packageDiff.removed,
+			changed: packageDiff.changed,
+		};
+		const fingerprint = sha256(
+			JSON.stringify({
+				branch: status.branch,
+				commit: status.commit,
+				ahead: status.ahead,
+				behind: status.behind,
+				pendingOperation: state.pendingOperation,
+				changes,
+				packages,
+			}),
+		);
+		return {
+			kind: "ready",
+			fingerprint,
+			changes: changes.map(({ relativePath, changeType }) => ({
+				relativePath,
+				changeType,
+			})),
+			packages,
+			remote: { ahead: status.ahead, behind: status.behind },
+			pendingRecovery: state.pendingOperation !== null,
+			message:
+				"Review this plan before synchronization changes your configuration.",
+		};
+	}
+
 	/** Resolve a user-confirmed conflict choice without trusting UI-supplied paths. */
 	async resolveConflict(
 		request: SyncConflictRequest,
-		choice: import("./operation-result.ts").AutomaticConflictChoice,
+		choice: ConflictResolutionChoice,
 		options: Pick<
 			RunOptions,
 			"packageApproval" | "signal" | "onProgress" | "onGitCommandStart"
 		> = {},
 	): Promise<RunResult> {
-		return await withOperationSignal(options.signal, async () => {
+		return withOperationSignal(options.signal, async () => {
+			const selections = this.normalizeConflictChoices(request, choice);
+			if (!selections) {
+				return {
+					ok: false,
+					code: "blocked_validation",
+					message:
+						"Conflict selections must choose current-device or shared remote content for every reported path.",
+					reload: false,
+					mode: "sync",
+					phase: "preflight",
+				};
+			}
 			const lifecycle = await this.inspectLifecycleState();
 			if (lifecycle.kind !== "initialized") {
 				return {
@@ -286,7 +409,7 @@ export class PiSyncCommands {
 					config,
 					state,
 					request,
-					choice,
+					choice: selections,
 					packageApproval: options.packageApproval,
 					reportProgress: (phase, message) =>
 						this.emitProgress(options.onProgress, phase, message),
@@ -640,6 +763,23 @@ export class PiSyncCommands {
 
 		this.orchestrationLockHeld = true;
 		try {
+			if (options.expectedPlanFingerprint) {
+				const currentPlan = await this.planInitializedSync(
+					lifecycle.repoPath,
+					lifecycle.state,
+				);
+				if (currentPlan.fingerprint !== options.expectedPlanFingerprint) {
+					return {
+						ok: false,
+						code: "blocked_validation",
+						message:
+							"The sync plan changed while you were reviewing it. Review the new plan and run /pisync again.",
+						reload: false,
+						mode: "sync",
+						phase: "preflight",
+					};
+				}
+			}
 			let recoveryReload = false;
 			if (lifecycle.state.pendingOperation) {
 				this.emitProgress(

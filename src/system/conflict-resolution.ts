@@ -1,5 +1,5 @@
 import type {
-	AutomaticConflictChoice,
+	ConflictPathChoices,
 	SyncConflictRequest,
 } from "../orchestration/operation-result.ts";
 import {
@@ -14,7 +14,7 @@ import {
 	listUnmergedEntries,
 } from "./git.ts";
 
-export interface ConflictValidationFailure {
+interface ConflictValidationFailure {
 	code: "blocked_validation" | "blocked_secret" | "approval_required";
 	message: string;
 	packages?: string[];
@@ -34,7 +34,7 @@ export type ConflictResolutionResult =
 export interface ConflictResolutionOptions {
 	repoPath: string;
 	request: SyncConflictRequest;
-	choice: AutomaticConflictChoice;
+	choice: ConflictPathChoices;
 	beforeCommit: () => Promise<ConflictValidationFailure | undefined>;
 }
 
@@ -128,11 +128,27 @@ export async function resolveAutomaticConflict(
 				throw new Error("Git merge failed before creating a conflict.");
 		}
 
-		const selectedStage = choice === "use_remote" ? 2 : 3;
 		const entries = await listUnmergedEntries(repoPath);
-		for (const entry of entries) {
+		const selectedChoices = entries.map((entry) => ({
+			entry,
+			selection: choice.byPath[entry.relativePath],
+		}));
+		if (
+			selectedChoices.some(
+				({ selection }) =>
+					selection !== "use_local" && selection !== "use_remote",
+			)
+		) {
+			return {
+				kind: "blocked",
+				message:
+					"The conflict paths changed before selection. Run /pisync again to review them.",
+			};
+		}
+		for (const { entry, selection } of selectedChoices) {
+			const selectedStage = selection === "use_remote" ? 2 : 3;
 			if (entry.stages.includes(selectedStage)) {
-				const checkoutSide = choice === "use_remote" ? "--ours" : "--theirs";
+				const checkoutSide = selection === "use_remote" ? "--ours" : "--theirs";
 				await gitExec(repoPath, [
 					"checkout",
 					checkoutSide,
